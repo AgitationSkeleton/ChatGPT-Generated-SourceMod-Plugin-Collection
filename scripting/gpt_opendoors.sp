@@ -4,7 +4,7 @@
 public Plugin myinfo =
 {
     name = "Force Open Doors",
-    author = "Your Name",
+    author = "ChatGPT",
     description = "Forces all func_doors in the map to stay open every 30 seconds",
     version = "1.0",
     url = "N/A"
