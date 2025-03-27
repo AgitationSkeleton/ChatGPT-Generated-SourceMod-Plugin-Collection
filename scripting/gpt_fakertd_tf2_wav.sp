@@ -24,15 +24,15 @@ char g_sExplosionSounds[4][PLATFORM_MAX_PATH] = {
 
 // Voiceline sounds
 char g_sVoicelines[9][PLATFORM_MAX_PATH] = {
-    "vo/demoman_laughlong02.mp3",
-    "vo/engineer_laughhappy03.mp3",
-    "vo/heavy_laughterbig01.mp3",
-    "vo/medic_laughlong01.mp3",
-    "vo/pyro_laugh_addl04.mp3",
-    "vo/scout_laughlong02.mp3",
-    "vo/sniper_laughlong02.mp3",
-    "vo/soldier_laughlong03.mp3",
-    "vo/spy_laughlong01.mp3"
+    "vo/demoman_laughlong02.wav",
+    "vo/engineer_laughhappy03.wav",
+    "vo/heavy_laughterbig01.wav",
+    "vo/medic_laughlong01.wav",
+    "vo/pyro_laugh_addl04.wav",
+    "vo/scout_laughlong02.wav",
+    "vo/sniper_laughlong02.wav",
+    "vo/soldier_laughlong03.wav",
+    "vo/spy_laughlong01.wav"
 };
 
 public void OnPluginStart()
