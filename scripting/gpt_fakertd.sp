@@ -84,11 +84,35 @@ public Action:Command_RTD(client, args)
     GetClientName(client, name, sizeof(name));
     PrintToChatAll("%s rolled: [ Explode ]", name);
     
+    // Create a white screen flash effect
+    Handle fade = CreateEntityByName("env_fade");
+    if (IsValidEntity(fade))
+    {
+        DispatchKeyValue(fade, "duration", "0.5");
+        DispatchKeyValue(fade, "holdtime", "0.1");
+        DispatchKeyValue(fade, "rendercolor", "255 255 255");
+        DispatchKeyValue(fade, "renderamt", "255");
+        DispatchKeyValue(fade, "spawnflags", "1"); // Only affect the client
+        DispatchSpawn(fade);
+        AcceptEntityInput(fade, "Fade", client);
+        CreateTimer(1.0, DeleteEntity, fade);
+    }
+    
     // Play the explosion sound and force the player's suicide
     EmitSoundToClient(client, g_sExplosionSound);
     ForcePlayerSuicide(client);
     
     return Plugin_Handled;
+}
+
+// Timer to delete the fade entity
+public Action DeleteEntity(Handle timer, int entity)
+{
+    if (IsValidEntity(entity))
+    {
+        RemoveEdict(entity);
+    }
+    return Plugin_Stop;
 }
 
 // Reset cooldowns if cooldown time is exceeded
