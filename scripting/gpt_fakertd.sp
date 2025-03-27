@@ -27,6 +27,9 @@ public void OnPluginStart()
     RegConsoleCmd("!rtd", Command_RTD, "Fake Roll The Dice");
     RegConsoleCmd("!rollthedice", Command_RTD, "Fake Roll The Dice");
 
+    // Register chat listener for "rtd"
+    HookEvent("player_say", Event_PlayerSay);
+
     // Precache the explosion sound to ensure it plays
     PrecacheSound(g_sExplosionSound, true);
     
@@ -34,6 +37,22 @@ public void OnPluginStart()
     char fullPath[PLATFORM_MAX_PATH];
     Format(fullPath, sizeof(fullPath), "sound/%s", g_sExplosionSound);
     AddFileToDownloadsTable(fullPath);
+}
+
+// Handle chat messages to detect "rtd"
+public Action Event_PlayerSay(Event event, const char[] name, bool dontBroadcast)
+{
+    int client = GetClientOfUserId(GetEventInt(event, "userid"));
+    char message[192];
+    GetEventString(event, "text", message, sizeof(message));
+    
+    if (StrEqual(message, "rtd", false))
+    {
+        Command_RTD(client, 0);
+        return Plugin_Handled;
+    }
+    
+    return Plugin_Continue;
 }
 
 // Command handler for rolling the dice
