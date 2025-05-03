@@ -72,7 +72,9 @@ public Action:Command_RTD(client, args)
     PrintToChatAll("%s rolled: [ Explode ]", name);
 
     EmitSoundToClient(client, g_sExplosionSound);
-    ForcePlayerSuicide(client);
+
+    // More reliable for TF2-port than ForcePlayerSuicide()
+    FakeClientCommand(client, "kill");
 
     return Plugin_Handled;
 }
