@@ -14,7 +14,7 @@ public Plugin:myinfo =
     name = "Bot Inactivity Slay (TF2-port)",
     author = "ChatGPT",
     description = "Slays bots if they haven't scored in 120 seconds.",
-    version = "1.0"
+    version = "1.1"
 };
 
 public OnPluginStart()
@@ -47,7 +47,7 @@ public Action:Timer_CheckBotScores(Handle:timer)
         else if ((currentTime - g_fLastScoreTime[client]) >= MAX_INACTIVE_TIME)
         {
             PrintToServer("[BotSlay] Slaying bot %N for inactivity.", client);
-            ForcePlayerSuicide(client);
+            FakeClientCommand(client, "kill");
             g_fLastScoreTime[client] = currentTime;
         }
     }
