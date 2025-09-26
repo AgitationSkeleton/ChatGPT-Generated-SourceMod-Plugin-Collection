@@ -8,7 +8,7 @@
 #include <hamsandwich>
 
 #define PLUGIN  "DMC Restore Crouch"
-#define VERSION "0.3b"
+#define VERSION "0.3c"
 #define AUTHOR  "gpt"
 
 // --- Cvars ---
@@ -79,9 +79,27 @@ public OnPlayerKilledPost(victim, killer, shouldgib)
     g_isDucking[victim] = false;
 }
 
+// ---------- ALIVE/SPAwned guard ----------
+stock bool:IsSpawnedAlive(id)
+{
+    // Must be in-game, alive, and not in spectator/observer mode
+    if (!is_user_connected(id) || !is_user_alive(id)) return false;
+
+    // Spectator check: HL uses iuser1 for observer modes (0 == not observing)
+    // If unavailable in a given mod, this will just read 0 and pass.
+    new iobs = pev(id, pev_iuser1);
+    if (iobs != 0) return false;
+
+    // Optional: ignore players with no collision (not spawned in world)
+    new solid = pev(id, pev_solid);
+    if (solid == SOLID_NOT) return false;
+
+    return true;
+}
+
 public OnPlayerPreThink(id)
 {
-    if (!is_user_alive(id)) return HAM_IGNORED;
+    if (!IsSpawnedAlive(id)) return HAM_IGNORED;
 
     // Read buttons
     new buttons = pev(id, pev_button);
@@ -121,7 +139,7 @@ public OnPlayerPreThink(id)
             ExitDuck(id);
             g_isDucking[id] = false;
         }
-        // else: remain crouched until headroom is clear; no compounding, no origin nudges
+        // else: remain crouched until headroom is clear
     }
 
     return HAM_IGNORED;
@@ -131,6 +149,8 @@ public OnPlayerPreThink(id)
 
 stock bool:EnterDuck(id)
 {
+    if (!IsSpawnedAlive(id)) return false;
+
     // Build duck hull using live standing XY (from cache) and duck Z from cvars
     new Float:mins[3], Float:maxs[3];
 
@@ -169,6 +189,8 @@ stock bool:EnterDuck(id)
 
 stock ExitDuck(id)
 {
+    if (!IsSpawnedAlive(id)) return;
+
     // Restore exact standing hull if known; otherwise safe defaults
     if (g_haveStandHull[id])
         engfunc(EngFunc_SetSize, id, g_stand_mins[id], g_stand_maxs[id]);
@@ -178,7 +200,7 @@ stock ExitDuck(id)
     // Clear flag
     set_pev(id, pev_flags, pev(id, pev_flags) & ~FL_DUCKING);
 
-    // Restore the exact standing view we cached, if available; else leave as-is
+    // Restore the exact standing view we cached, if available
     if (g_haveStandView[id])
         set_pev(id, pev_view_ofs, g_stand_viewofs[id]);
 
