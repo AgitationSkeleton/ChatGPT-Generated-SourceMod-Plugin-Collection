@@ -1,152 +1,83 @@
-/*  Ricochet Menu Key Bridge (No HamSandwich)
+/* Ricochet Menu Vote Helper (no Ham)
+ * Adds chat-based voting while a menu is open:
+ *   say: 1..10, !1..!10, /1.. /10  -> menuselect N
+ * Shows a HUD hint "Type 1-10 in chat to vote" when a menu opens.
  *
- *  Purpose:
- *    Restores number-key menu selection by translating slot1..slot10 into
- *    "menuselect <n>" when a menu is open (e.g., deagsmapmanager vote).
- *
- *  How it works:
- *    - Hooks "slot1".."slot10" client commands.
- *    - If a menu is currently open for the player (old-style show_menu or new AMXX menu),
- *      it issues "menuselect <n>" and swallows the original command.
- *    - If no menu is open, it either lets the original command pass or swallows it,
- *      depending on a cvar (default: let it pass).
- *
- *  Cvars:
- *    rcvote_enable        "1"   // Master on/off
- *    rcvote_only_when_menu "1"  // 1 = bridge only when a menu is open (safe default)
- *                               // 0 = always translate slotX -> menuselect X
- *    rcvote_swallow_when_no_menu "0" // When only_when_menu=1 and no menu is open:
- *                                    // 0 = let slotX pass through, 1 = swallow it
- *
- *  Test Cmd (optional):
- *    rcvote_testmenu      // Opens a 5-choice test menu for the caller
- *
- *  Notes:
- *    - No HamSandwich. AMXX core only.
- *    - Works with plugins that rely on "menuselect" (e.g., deagsmapmanager).
- *    - “0” key is “menuselect 10”.
+ * Cvars:
+ *   rcvote_helper_enable 1
+ *   rcvote_helper_hint   1   // show HUD hint when menu appears
  */
-
 #include <amxmodx>
 
-#define PLUGIN  "Ricochet Menu Key Bridge"
-#define VERSION "1.0"
+#define PLUGIN  "Ricochet Menu Vote Helper"
+#define VERSION "1.2"
 #define AUTHOR  "gpt"
 
-// Cvars
-new g_pEnable;
-new g_pOnlyWhenMenu;
-new g_pSwallowNoMenu;
-
-// Forward decls
-public plugin_init();
-public hook_slot1(id);  public hook_slot2(id);  public hook_slot3(id);  public hook_slot4(id);  public hook_slot5(id);
-public hook_slot6(id);  public hook_slot7(id);  public hook_slot8(id);  public hook_slot9(id);  public hook_slot10(id);
+new g_pEnable, g_pHint;
 
 public plugin_init()
 {
     register_plugin(PLUGIN, VERSION, AUTHOR);
+    g_pEnable = register_cvar("rcvote_helper_enable", "1");
+    g_pHint   = register_cvar("rcvote_helper_hint",   "1");
 
-    g_pEnable          = register_cvar("rcvote_enable", "1");
-    g_pOnlyWhenMenu    = register_cvar("rcvote_only_when_menu", "1");
-    g_pSwallowNoMenu   = register_cvar("rcvote_swallow_when_no_menu", "0");
+    // Chat hooks
+    register_clcmd("say",      "hook_say");
+    register_clcmd("say_team", "hook_say");
 
-    // Hook slot commands (1..10). 10 corresponds to the "0" key in HL menus.
-    register_clcmd("slot1",  "hook_slot1");
-    register_clcmd("slot2",  "hook_slot2");
-    register_clcmd("slot3",  "hook_slot3");
-    register_clcmd("slot4",  "hook_slot4");
-    register_clcmd("slot5",  "hook_slot5");
-    register_clcmd("slot6",  "hook_slot6");
-    register_clcmd("slot7",  "hook_slot7");
-    register_clcmd("slot8",  "hook_slot8");
-    register_clcmd("slot9",  "hook_slot9");
-    register_clcmd("slot10", "hook_slot10");
-
-    // Small test tool to confirm behavior in-game (type in client console):
-    register_clcmd("rcvote_testmenu", "cmd_testmenu");
+    // Poll for menu state to display hint (no engine hook for "menu opened")
+    set_task(0.5, "task_menu_hint", .flags="b");
 }
 
-/* Helpers */
-
-stock bool:is_enabled()
+public hook_say(id)
 {
-    return get_pcvar_num(g_pEnable) != 0;
+    if (!get_pcvar_num(g_pEnable)) return PLUGIN_CONTINUE;
+    if (!is_user_connected(id))    return PLUGIN_CONTINUE;
+
+    static msg[64]; read_args(msg, charsmax(msg)); remove_quotes(msg);
+    if (!msg[0]) return PLUGIN_CONTINUE;
+
+    // Normalize inputs: "1".."10", "!1".. "!10", "/1".."/10"
+    new n = parse_vote_number(msg);
+    if (n < 1 || n > 10) return PLUGIN_CONTINUE;
+
+    // Only act if a menu is open for this player
+    new keys, menuid;
+    if (get_user_menu(id, keys, menuid) == 0) return PLUGIN_CONTINUE;
+
+    client_cmd(id, "menuselect %d", n);
+    return PLUGIN_HANDLED; // hide the chat message
 }
 
-// Returns true if user currently has any menu open (old-style "show_menu" or new AMXX menu)
-stock bool:user_has_menu_open(id)
+stock parse_vote_number(const s[])
 {
-    new keys, menuId;
-    if (!is_user_connected(id))
-        return false;
-
-    // get_user_menu returns 0 if no menu is open
-    return (get_user_menu(id, keys, menuId) != 0);
-}
-
-// Core translator
-stock handle_slot_to_menuselect(id, const selection)
-{
-    if (!is_enabled())
-        return PLUGIN_CONTINUE;
-
-    new onlyWhenMenu = get_pcvar_num(g_pOnlyWhenMenu);
-    new swallowWhenNo = get_pcvar_num(g_pSwallowNoMenu);
-
-    if (onlyWhenMenu)
+    // skip leading symbols
+    new i=0;
+    if (s[i]=='!' || s[i]=='/') i++;
+    // parse int
+    new val=0, found=0;
+    while (s[i]>='0' && s[i]<='9')
     {
-        if (user_has_menu_open(id))
+        val = val*10 + (s[i]-'0'); i++; found=1;
+        if (val>10) break;
+    }
+    return found ? val : 0;
+}
+
+public task_menu_hint()
+{
+    if (!get_pcvar_num(g_pEnable) || !get_pcvar_num(g_pHint)) return;
+
+    // show hint to any player that currently has a menu open
+    for (new id=1; id<=get_maxplayers(); id++)
+    {
+        if (!is_user_connected(id)) continue;
+        new keys, menuid;
+        if (get_user_menu(id, keys, menuid) != 0)
         {
-            // A menu is open — send menuselect and swallow original command
-            client_cmd(id, "menuselect %d", selection);
-            return PLUGIN_HANDLED;
+            // brief, subtle HUD text at top
+            set_hudmessage(200, 200, 255, -1.0, 0.10, 0, 0.0, 0.6, 0.0, 0.0, 2);
+            show_hudmessage(id, "Menu open: Type 1 - 10 in chat to vote");
         }
-        // No menu is open:
-        // Either swallow or let it pass (default: let pass)
-        return swallowWhenNo ? PLUGIN_HANDLED : PLUGIN_CONTINUE;
     }
-    else
-    {
-        // Always translate slotX to menuselect X
-        client_cmd(id, "menuselect %d", selection);
-        return PLUGIN_HANDLED;
-    }
-}
-
-/* Slot handlers */
-
-public hook_slot1(id)  { return handle_slot_to_menuselect(id, 1);  }
-public hook_slot2(id)  { return handle_slot_to_menuselect(id, 2);  }
-public hook_slot3(id)  { return handle_slot_to_menuselect(id, 3);  }
-public hook_slot4(id)  { return handle_slot_to_menuselect(id, 4);  }
-public hook_slot5(id)  { return handle_slot_to_menuselect(id, 5);  }
-public hook_slot6(id)  { return handle_slot_to_menuselect(id, 6);  }
-public hook_slot7(id)  { return handle_slot_to_menuselect(id, 7);  }
-public hook_slot8(id)  { return handle_slot_to_menuselect(id, 8);  }
-public hook_slot9(id)  { return handle_slot_to_menuselect(id, 9);  }
-public hook_slot10(id) { return handle_slot_to_menuselect(id, 10); } // "0" key
-
-/* Optional: a quick test menu you can open from client console with "rcvote_testmenu" */
-public cmd_testmenu(id)
-{
-    if (!is_user_connected(id)) return PLUGIN_HANDLED;
-
-    new keys = (1<<0)|(1<<1)|(1<<2)|(1<<3)|(1<<4) // 1..5
-             | (1<<9);                            // 0 key as "10" (often "Exit")
-
-    static body[256];
-    formatex(body, charsmax(body),
-        "\rRCVote Test Menu^n^n\
-        \y1.\w Option One^n\
-        \y2.\w Option Two^n\
-        \y3.\w Option Three^n\
-        \y4.\w Option Four^n\
-        \y5.\w Option Five^n^n\
-        \y0.\w Exit");
-
-    // Show for 15 seconds; menuid label helps tools/debuggers but is not required
-    show_menu(id, keys, body, 15, "RCVoteTest");
-
-    return PLUGIN_HANDLED;
 }
