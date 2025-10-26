@@ -1,4 +1,4 @@
-// gpt_closeenoughmerc.sp — v0.10.5
+// gpt_closeenoughmerc.sp — v0.10.5 (targeted fixes per Max)
 // Only tf2c.inc + sdkhooks + sdktools.
 
 #pragma semicolon 1
@@ -24,6 +24,7 @@ ConVar gCvarVMInterval; // viewmodel keepalive interval (seconds)
 // ------------ State ------------
 bool  g_bMercVoice[MAXPLAYERS+1];
 bool  g_bBypassVoiceBlock[MAXPLAYERS+1];
+bool g_bBotIsGrunt[MAXPLAYERS+1];
 Handle g_hArmsTick[MAXPLAYERS+1]; // repeating keepalive timer per client
 
 // ------------ Helpers ------------
@@ -234,6 +235,7 @@ public void OnPluginStart()
 
     AddNormalSoundHook(SNDHook);
 	AddNormalSoundHook(BotMercSNDHook);
+	AddCommandListener(GruntListener, "sm_grunt");
     RegConsoleCmd("voicemenu", Cmd_VoiceMenu);
 
     HookEvent("player_spawn", Evt_PlayerSpawn, EventHookMode_Post);
@@ -359,13 +361,22 @@ public Action BotMercSNDHook(int clients[MAXPLAYERS], int &numClients,
     if (!(1 <= entity && entity <= MaxClients) || !IsClientInGame(entity) || !IsFakeClient(entity))
         return Plugin_Continue;
 
-    // Only if bot is using a merc model
-    char mdl[PLATFORM_MAX_PATH];
-    GetClientModel(entity, mdl, sizeof mdl);
-    if (mdl[0] == '\0' || (StrContains(mdl, "mercenary.mdl", false) == -1
-                        && StrContains(mdl, "merc_deathmatch.mdl", false) == -1
-                        && StrContains(mdl, "/merc", false) == -1))
-        return Plugin_Continue;
+	// Treat as Merc if bot is using a merc model OR we saw "sm_grunt 1" run on it
+	bool isMercModel = false;
+	char mdl[PLATFORM_MAX_PATH];
+	GetClientModel(entity, mdl, sizeof mdl);
+	if (mdl[0] != '\0')
+	{
+		if (StrContains(mdl, "mercenary.mdl", false) != -1
+		|| StrContains(mdl, "merc_deathmatch.mdl", false) != -1
+		|| StrContains(mdl, "/merc", false) != -1)
+		{
+			isMercModel = true;
+		}
+	}
+	
+	if (!isMercModel && !g_bBotIsGrunt[entity])
+    return Plugin_Continue;
 
     // Only voice channel
     if (channel != SNDCHAN_VOICE)
@@ -488,6 +499,22 @@ public Action BotMercSNDHook(int clients[MAXPLAYERS], int &numClients,
     // Anything else Soldier tried to say → mute per your instruction.
     return Plugin_Stop;
 
+}
+
+public Action GruntListener(int client, const char[] command, int argc)
+{
+    // We only care if a BOT runs "sm_grunt ..."
+    if (!(1 <= client && client <= MaxClients) || !IsClientInGame(client) || !IsFakeClient(client))
+        return Plugin_Continue;
+
+    // Read the first arg ("1" to enable, "0" to disable), default to 1 if omitted
+    char arg[8];
+    GetCmdArg(1, arg, sizeof arg);
+
+    bool enable = (arg[0] == '\0') ? true : (StringToInt(arg) != 0);
+    g_bBotIsGrunt[client] = enable;
+
+    return Plugin_Continue; // don’t block the real command
 }
 
 // ------------ Viewmodel control ------------
