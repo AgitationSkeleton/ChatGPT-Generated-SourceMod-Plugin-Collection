@@ -76,7 +76,7 @@ public void OnPluginStart()
         SetFailState("Failed to register ClientPrefs cookie.");
     }
 
-    RegConsoleCmd("sm_admingoldenwrench", Cmd_ToggleSelf,
+    RegAdminCmd("sm_admingoldenwrench", Cmd_ToggleSelf, ADMFLAG_GENERIC,
         "Enable/disable your Golden Wrench auto-give (default ON). Usage: sm_admingoldenwrench [0|1]");
 
     HookEvent("player_spawn", Event_PlayerSpawn, EventHookMode_PostNoCopy);
