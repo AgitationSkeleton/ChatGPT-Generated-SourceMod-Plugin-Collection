@@ -60,6 +60,20 @@ static const char g_Spy[][]     = {"vo/spy_jump01.wav","vo/spy_jump02.wav","vo/s
 // Civilian: single clip (added to downloads on map start)
 static const char g_CivilianSingle[] = "vo/civilian_jump01.wav";
 
+// Additional model-based sets
+static const char g_Mercenary[][] = {
+    "vo/mercenary_jump01.wav",
+    "vo/mercenary_jump02.wav",
+    "vo/mercenary_jump03.wav"
+};
+
+static const char g_TF2CCivilian[][] = {
+    "vo/tf2ccivilian_jump01.wav",
+    "vo/tf2ccivilian_jump02.wav",
+    "vo/tf2ccivilian_jump03.wav"
+};
+
+
 // ---------------------------------------------------------------------
 // Plugin info
 // ---------------------------------------------------------------------
@@ -144,7 +158,12 @@ public void OnMapStart()
     PrecacheSound(g_CivilianSingle, true);
     char fullpath[PLATFORM_MAX_PATH];
     Format(fullpath, sizeof(fullpath), "sound/%s", g_CivilianSingle);
-    AddFileToDownloadsTable(fullpath);
+    AddFileToDownloadsTable(fullpath);	
+	
+	// Model-based overrides
+	PrecacheAndAddDownloadList(g_Mercenary, sizeof(g_Mercenary));
+	PrecacheAndAddDownloadList(g_TF2CCivilian, sizeof(g_TF2CCivilian));
+	
 }
 
 // ---------------------------------------------------------------------
@@ -284,6 +303,24 @@ static bool GetRandomClassJumpSound(int client, char[] out, int outlen)
         out[0] = '\0'; // e.g., cloaked Spy
         return false;
     }
+	
+	// Override by model: if the player's model contains "mercenary.mdl" or "tf2c"
+	char mdl[PLATFORM_MAX_PATH];
+	GetClientModel(client, mdl, sizeof(mdl));
+	
+	// Case-insensitive substring checks
+	if (StrContains(mdl, "mercenary.mdl", false) != -1)
+	{
+		PickRandomFrom(g_Mercenary, sizeof(g_Mercenary), out, outlen);
+		return (out[0] != '\0');
+	}
+	
+	if (StrContains(mdl, "tf2c", false) != -1)
+	{
+		PickRandomFrom(g_TF2CCivilian, sizeof(g_TF2CCivilian), out, outlen);
+		return (out[0] != '\0');
+	}
+		
 
     if (cls == TFClass_Civilian)
     {
