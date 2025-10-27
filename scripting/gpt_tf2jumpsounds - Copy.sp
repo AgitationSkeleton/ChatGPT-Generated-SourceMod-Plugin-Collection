@@ -1,15 +1,15 @@
 /**
- * TF2 Class Jump VO (robot-aware + Voices from Below pitch)
+ * TF2 Class Jump VO (autobhop-friendly + Spy cloak/disguise aware + per-client mute + MvM manual sets)
  *
- * - Autobhop-friendly liftoff detection (ground→air + recent press window)
- * - Spy: silent while cloaked; if disguised, uses disguised class for VO
- * - Robot model check: if the player's model contains "bot_", use vo/mvm_* jump lines
- * - Per-client toggle: !jumpsounds (ClientPrefs; default ON)
- * - Voices from Below: optional pitch lowering via TF2Attributes (HookValue*), default 0.70
+ * - Plays a class-specific VO sound as a world sound (at player's location) at volume JUMP_VO_VOLUME.
+ * - Works with autobunnyhop by detecting liftoff (ground->air) with a short recent-press window.
+ * - Spy:
+ *     * Cloaked  -> silent.
+ *     * Disguised -> use disguised class's VO.
+ * - Per-client toggle: !jumpsounds (default ON). Persisted with ClientPrefs.
+ * - MvM: If player's model contains "bot_", use mvm_ prefixed VO variants (manually defined).
  *
- * Game: Team Fortress 2 (live)
- * Requires: SM 1.10+, sdktools, clientprefs, tf2, tf2_stocks
- * Optional: TF2Attributes (for VfB pitch detection)
+ * Requires: SM 1.10+, sdktools, tf2, tf2_stocks, clientprefs
  */
 
 #include <sourcemod>
@@ -19,31 +19,21 @@
 #include <tf2_stocks>
 #include <clientprefs>
 
-// Optional header; plugin still compiles/runs if missing.
-#tryinclude <tf2attributes>
-
 #pragma semicolon 1
 #pragma newdecls required
 
 #define PLUGIN_NAME        "TF2 Class Jump VO"
-#define PLUGIN_VERSION     "1.4.0"
+#define PLUGIN_VERSION     "1.3.0"
 #define PLUGIN_AUTHOR      "ChatGPT"
-#define PLUGIN_DESCRIPTION "Class jump VO w/ autobhop, Spy rules, robot MvM VO, per-client toggle, and VfB pitch"
+#define PLUGIN_DESCRIPTION "Class jump VO with autobhop, Spy cloak/disguise, per-client toggle, and MvM variants"
 #define PLUGIN_URL         ""
 
 // ---------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------
-const float JUMP_VO_VOLUME      = 0.75;  // tweak to taste
-const float JUMP_SOUND_COOLDOWN = 0.02;  // debounce
-const float RECENT_JUMP_WINDOW  = 0.08;  // seconds; counts if jump pressed within this window
-
-// ---------------------------------------------------------------------
-// ConVars
-// ---------------------------------------------------------------------
-ConVar g_cvVfbPitch;    // pitch multiplier when Voices-from-Below is present (0.70 ≈ -30%)
-ConVar g_cvForcePitch;  // force-apply pitch multiplier for all players (testing)
-bool   g_bTF2Attrib;    // set at runtime if tf2attributes is present
+const float JUMP_VO_VOLUME        = 1.0;   // you had this set to 1.0; change if desired
+const float JUMP_SOUND_COOLDOWN   = 0.02;  // debounce
+const float RECENT_JUMP_WINDOW    = 0.08;  // seconds
 
 // ---------------------------------------------------------------------
 // ClientPrefs
@@ -61,7 +51,7 @@ float g_LastJumpPressTime[MAXPLAYERS + 1];
 
 // ---------------------------------------------------------------------
 // Sound tables (paths relative to "sound/")
-// Human VO
+// ---------------------------------------------------------------------
 static const char g_Scout[][]   = {"vo/scout_jump01.wav","vo/scout_jump02.wav","vo/scout_jump03.wav","vo/scout_jump04.wav","vo/scout_jump05.wav","vo/scout_jump06.wav"};
 static const char g_Soldier[][] = {"vo/soldier_jump01.wav","vo/soldier_jump02.wav","vo/soldier_jump03.wav","vo/soldier_jump04.wav"};
 static const char g_Pyro[][]    = {"vo/pyro_jump01.wav","vo/pyro_jump02.wav","vo/pyro_jump03.wav"};
@@ -72,16 +62,16 @@ static const char g_Medic[][]   = {"vo/medic_jump01.wav","vo/medic_jump02.wav","
 static const char g_Sniper[][]  = {"vo/sniper_jump01.wav","vo/sniper_jump02.wav","vo/sniper_jump03.wav"};
 static const char g_Spy[][]     = {"vo/spy_jump01.wav","vo/spy_jump02.wav","vo/spy_jump03.wav"};
 
-// Robot (MvM) VO — same filenames but prefixed "mvm_"
-static const char g_MVM_Scout[][]   = {"vo/mvm_scout_jump01.wav","vo/mvm_scout_jump02.wav","vo/mvm_scout_jump03.wav","vo/mvm_scout_jump04.wav","vo/mvm_scout_jump05.wav","vo/mvm_scout_jump06.wav"};
-static const char g_MVM_Soldier[][] = {"vo/mvm_soldier_jump01.wav","vo/mvm_soldier_jump02.wav","vo/mvm_soldier_jump03.wav","vo/mvm_soldier_jump04.wav"};
-static const char g_MVM_Pyro[][]    = {"vo/mvm_pyro_jump01.wav","vo/mvm_pyro_jump02.wav","vo/mvm_pyro_jump03.wav"};
-static const char g_MVM_Demo[][]    = {"vo/mvm_demo_jump01.wav","vo/mvm_demo_jump02.wav","vo/mvm_demo_jump03.wav"};
-static const char g_MVM_Heavy[][]   = {"vo/mvm_heavy_jump01.wav","vo/mvm_heavy_jump02.wav","vo/mvm_heavy_jump03.wav"};
-static const char g_MVM_Engie[][]   = {"vo/mvm_engie_jump01.wav","vo/mvm_engie_jump02.wav","vo/mvm_engie_jump03.wav","vo/mvm_engie_jump04.wav"};
-static const char g_MVM_Medic[][]   = {"vo/mvm_medic_jump01.wav","vo/mvm_medic_jump02.wav","vo/mvm_medic_jump03.wav"};
-static const char g_MVM_Sniper[][]  = {"vo/mvm_sniper_jump01.wav","vo/mvm_sniper_jump02.wav","vo/mvm_sniper_jump03.wav"};
-static const char g_MVM_Spy[][]     = {"vo/mvm_spy_jump01.wav","vo/mvm_spy_jump02.wav","vo/mvm_spy_jump03.wav"};
+// ----- Manual MvM ("mvm_") variants -----
+static const char g_Scout_MVM[][]   = {"vo/mvm_scout_jump01.wav","vo/mvm_scout_jump02.wav","vo/mvm_scout_jump03.wav","vo/mvm_scout_jump04.wav","vo/mvm_scout_jump05.wav","vo/mvm_scout_jump06.wav"};
+static const char g_Soldier_MVM[][] = {"vo/mvm_soldier_jump01.wav","vo/mvm_soldier_jump02.wav","vo/mvm_soldier_jump03.wav","vo/mvm_soldier_jump04.wav"};
+static const char g_Pyro_MVM[][]    = {"vo/mvm_pyro_jump01.wav","vo/mvm_pyro_jump02.wav","vo/mvm_pyro_jump03.wav"};
+static const char g_Demo_MVM[][]    = {"vo/mvm_demo_jump01.wav","vo/mvm_demo_jump02.wav","vo/mvm_demo_jump03.wav"};
+static const char g_Heavy_MVM[][]   = {"vo/mvm_heavy_jump01.wav","vo/mvm_heavy_jump02.wav","vo/mvm_heavy_jump03.wav"};
+static const char g_Engie_MVM[][]   = {"vo/mvm_engie_jump01.wav","vo/mvm_engie_jump02.wav","vo/mvm_engie_jump03.wav","vo/mvm_engie_jump04.wav"};
+static const char g_Medic_MVM[][]   = {"vo/mvm_medic_jump01.wav","vo/mvm_medic_jump02.wav","vo/mvm_medic_jump03.wav"};
+static const char g_Sniper_MVM[][]  = {"vo/mvm_sniper_jump01.wav","vo/mvm_sniper_jump02.wav","vo/mvm_sniper_jump03.wav"};
+static const char g_Spy_MVM[][]     = {"vo/mvm_spy_jump01.wav","vo/mvm_spy_jump02.wav","vo/mvm_spy_jump03.wav"};
 
 // ---------------------------------------------------------------------
 // Plugin info
@@ -100,17 +90,8 @@ public Plugin myinfo =
 // ---------------------------------------------------------------------
 public void OnPluginStart()
 {
+    // ClientPrefs cookie (default to hear = true)
     g_hCookieHear = RegClientCookie("tf2_jumpvo_hear", "TF2 Jump VO per-client hearing preference (1=on,0=off)", CookieAccess_Public);
-
-    g_cvVfbPitch = CreateConVar("sm_jumpvo_vfb_pitch", "0.70",
-        "Pitch multiplier when player has 'Voices from Below' (0.70 ≈ 30% lower; 1.0 = normal).",
-        FCVAR_NOTIFY, true, 0.10, true, 2.00);
-
-    g_cvForcePitch = CreateConVar("sm_jumpvo_force_pitch", "0",
-        "Force pitch multiplier on all jump VO (testing/diagnostics).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
-
-    // Detect tf2attributes presence at runtime
-    g_bTF2Attrib = LibraryExists("tf2attributes");
 
     // Chat/console command: !jumpsounds
     RegConsoleCmd("sm_jumpsounds", Cmd_ToggleJumpSounds);
@@ -162,7 +143,7 @@ public void OnClientCookiesCached(int client)
 
 public void OnMapStart()
 {
-    // Precache + downloads for all human VO
+    // Precache + downloads for both normal and MvM variants
     PrecacheAndAddDownloadList(g_Scout,   sizeof(g_Scout));
     PrecacheAndAddDownloadList(g_Soldier, sizeof(g_Soldier));
     PrecacheAndAddDownloadList(g_Pyro,    sizeof(g_Pyro));
@@ -173,16 +154,15 @@ public void OnMapStart()
     PrecacheAndAddDownloadList(g_Sniper,  sizeof(g_Sniper));
     PrecacheAndAddDownloadList(g_Spy,     sizeof(g_Spy));
 
-    // Precache + downloads for MvM robot VO
-    PrecacheAndAddDownloadList(g_MVM_Scout,   sizeof(g_MVM_Scout));
-    PrecacheAndAddDownloadList(g_MVM_Soldier, sizeof(g_MVM_Soldier));
-    PrecacheAndAddDownloadList(g_MVM_Pyro,    sizeof(g_MVM_Pyro));
-    PrecacheAndAddDownloadList(g_MVM_Demo,    sizeof(g_MVM_Demo));
-    PrecacheAndAddDownloadList(g_MVM_Heavy,   sizeof(g_MVM_Heavy));
-    PrecacheAndAddDownloadList(g_MVM_Engie,   sizeof(g_MVM_Engie));
-    PrecacheAndAddDownloadList(g_MVM_Medic,   sizeof(g_MVM_Medic));
-    PrecacheAndAddDownloadList(g_MVM_Sniper,  sizeof(g_MVM_Sniper));
-    PrecacheAndAddDownloadList(g_MVM_Spy,     sizeof(g_MVM_Spy));
+    PrecacheAndAddDownloadList(g_Scout_MVM,   sizeof(g_Scout_MVM));
+    PrecacheAndAddDownloadList(g_Soldier_MVM, sizeof(g_Soldier_MVM));
+    PrecacheAndAddDownloadList(g_Pyro_MVM,    sizeof(g_Pyro_MVM));
+    PrecacheAndAddDownloadList(g_Demo_MVM,    sizeof(g_Demo_MVM));
+    PrecacheAndAddDownloadList(g_Heavy_MVM,   sizeof(g_Heavy_MVM));
+    PrecacheAndAddDownloadList(g_Engie_MVM,   sizeof(g_Engie_MVM));
+    PrecacheAndAddDownloadList(g_Medic_MVM,   sizeof(g_Medic_MVM));
+    PrecacheAndAddDownloadList(g_Sniper_MVM,  sizeof(g_Sniper_MVM));
+    PrecacheAndAddDownloadList(g_Spy_MVM,     sizeof(g_Spy_MVM));
 }
 
 // ---------------------------------------------------------------------
@@ -206,31 +186,9 @@ static void PickRandomFrom(const char[][] list, int count, char[] out, int outle
     strcopy(out, outlen, list[idx]);
 }
 
-static bool IsRobotModel(int client)
-{
-    char mdl[PLATFORM_MAX_PATH];
-    GetClientModel(client, mdl, sizeof(mdl));
-    return (StrContains(mdl, "bot_", false) != -1);
-}
-
 static bool GetRandomClassJumpSound(TFClassType cls, bool robot, char[] out, int outlen)
 {
-    if (robot)
-    {
-        switch (cls)
-        {
-            case TFClass_Scout:    { PickRandomFrom(g_MVM_Scout,   sizeof(g_MVM_Scout),   out, outlen); return true; }
-            case TFClass_Soldier:  { PickRandomFrom(g_MVM_Soldier, sizeof(g_MVM_Soldier), out, outlen); return true; }
-            case TFClass_Pyro:     { PickRandomFrom(g_MVM_Pyro,    sizeof(g_MVM_Pyro),    out, outlen); return true; }
-            case TFClass_DemoMan:  { PickRandomFrom(g_MVM_Demo,    sizeof(g_MVM_Demo),    out, outlen); return true; }
-            case TFClass_Heavy:    { PickRandomFrom(g_MVM_Heavy,   sizeof(g_MVM_Heavy),   out, outlen); return true; }
-            case TFClass_Engineer: { PickRandomFrom(g_MVM_Engie,   sizeof(g_MVM_Engie),   out, outlen); return true; }
-            case TFClass_Medic:    { PickRandomFrom(g_MVM_Medic,   sizeof(g_MVM_Medic),   out, outlen); return true; }
-            case TFClass_Sniper:   { PickRandomFrom(g_MVM_Sniper,  sizeof(g_MVM_Sniper),  out, outlen); return true; }
-            case TFClass_Spy:      { PickRandomFrom(g_MVM_Spy,     sizeof(g_MVM_Spy),     out, outlen); return true; }
-        }
-    }
-    else
+    if (!robot)
     {
         switch (cls)
         {
@@ -245,15 +203,28 @@ static bool GetRandomClassJumpSound(TFClassType cls, bool robot, char[] out, int
             case TFClass_Spy:      { PickRandomFrom(g_Spy,     sizeof(g_Spy),     out, outlen); return true; }
         }
     }
+    else
+    {
+        switch (cls)
+        {
+            case TFClass_Scout:    { PickRandomFrom(g_Scout_MVM,   sizeof(g_Scout_MVM),   out, outlen); return true; }
+            case TFClass_Soldier:  { PickRandomFrom(g_Soldier_MVM, sizeof(g_Soldier_MVM), out, outlen); return true; }
+            case TFClass_Pyro:     { PickRandomFrom(g_Pyro_MVM,    sizeof(g_Pyro_MVM),    out, outlen); return true; }
+            case TFClass_DemoMan:  { PickRandomFrom(g_Demo_MVM,    sizeof(g_Demo_MVM),    out, outlen); return true; }
+            case TFClass_Heavy:    { PickRandomFrom(g_Heavy_MVM,   sizeof(g_Heavy_MVM),   out, outlen); return true; }
+            case TFClass_Engineer: { PickRandomFrom(g_Engie_MVM,   sizeof(g_Engie_MVM),   out, outlen); return true; }
+            case TFClass_Medic:    { PickRandomFrom(g_Medic_MVM,   sizeof(g_Medic_MVM),   out, outlen); return true; }
+            case TFClass_Sniper:   { PickRandomFrom(g_Sniper_MVM,  sizeof(g_Sniper_MVM),  out, outlen); return true; }
+            case TFClass_Spy:      { PickRandomFrom(g_Spy_MVM,     sizeof(g_Spy_MVM),     out, outlen); return true; }
+        }
+    }
     out[0] = '\0';
     return false;
 }
 
 /**
  * Returns false if the Spy is cloaked (should not play).
- * Otherwise writes the effective class (disguise if present, else real class) to outCls and returns true.
- *
- * NOTE: Compare as ints to avoid tag-mismatch warnings on some compilers.
+ * Otherwise writes the "effective" class (disguise if present, else real class) to outCls and returns true.
  */
 static bool GetEffectiveClassForJump(int client, TFClassType &outCls)
 {
@@ -262,11 +233,8 @@ static bool GetEffectiveClassForJump(int client, TFClassType &outCls)
 
     if (TF2_IsPlayerInCondition(client, TFCond_Disguised))
     {
-        int d  = GetEntProp(client, Prop_Send, "m_nDisguiseClass");
-        int lo = view_as<int>(TFClass_Scout);
-        int hi = view_as<int>(TFClass_Engineer);
-
-        if (d >= lo && d <= hi)
+        int d = GetEntProp(client, Prop_Send, "m_nDisguiseClass");
+        if (d >= TFClass_Scout && d <= TFClass_Engineer)
         {
             outCls = view_as<TFClassType>(d);
             return true;
@@ -277,30 +245,11 @@ static bool GetEffectiveClassForJump(int client, TFClassType &outCls)
     return true;
 }
 
-// ---------------------------------------------------------------------
-// Voices-from-Below detection (optional; requires tf2attributes)
-// Uses only HookValue* forms which are widely supported.
-// ---------------------------------------------------------------------
-static bool HasVoicesFromBelow(int client)
+static bool IsRobotPlayerModel(int client)
 {
-    #if defined _tf2attributes_included
-        if (!g_bTF2Attrib)
-            return false;
-
-        // Generic pitch-scaling attribute many servers use for VfB
-        float scale = TF2Attrib_HookValueFloat(1.0, "voice pitch scale", client);
-        if (scale < 1.0) return true;
-
-        // Try a few common spell-name hooks as integer flags (nonzero if present)
-        if (TF2Attrib_HookValueInt(0, "voices from below", client) != 0)            return true;
-        if (TF2Attrib_HookValueInt(0, "SPELL: Voices From Below", client) != 0)     return true;
-        if (TF2Attrib_HookValueInt(0, "Halloween: Voices From Below", client) != 0) return true;
-        if (TF2Attrib_HookValueInt(0, "voices_from_below", client) != 0)            return true;
-
-        return false;
-    #else
-        return false;
-    #endif
+    char model[PLATFORM_MAX_PATH];
+    GetClientModel(client, model, sizeof(model));
+    return (StrContains(model, "bot_", false) != -1);
 }
 
 // ---------------------------------------------------------------------
@@ -342,7 +291,7 @@ public Action OnPlayerRunCmd(int client, int &buttons, int &impulse, float vel[3
 }
 
 // ---------------------------------------------------------------------
-// Sound emission (recipient-filtered for per-client mute)
+// Sound emission (recipient-filtered for per-client mute, MvM-aware)
 // ---------------------------------------------------------------------
 static void PlayClassJumpVO(int client)
 {
@@ -353,7 +302,7 @@ static void PlayClassJumpVO(int client)
     if (!GetEffectiveClassForJump(client, effClass))
         return; // cloaked Spy -> silent
 
-    bool robot = IsRobotModel(client);
+    bool robot = IsRobotPlayerModel(client);
 
     char sample[PLATFORM_MAX_PATH];
     if (!GetRandomClassJumpSound(effClass, robot, sample, sizeof(sample)) || sample[0] == '\0')
@@ -365,29 +314,20 @@ static void PlayClassJumpVO(int client)
     for (int i = 1; i <= MaxClients; i++)
     {
         if (!IsClientInGame(i))  continue;
-        if (IsFakeClient(i))     continue; // skip bots
+        if (IsFakeClient(i))     continue; // no need to send to bots
         if (!g_bHear[i])         continue;
+
         recips[n++] = i;
     }
+
     if (n == 0)
         return;
 
-    // Pitch handling: apply Voices-from-Below multiplier if detected (or forced for testing)
-    float mul = g_cvVfbPitch.FloatValue;       // default 0.70
-    if (mul < 0.10) mul = 0.10;
-    if (mul > 2.00) mul = 2.00;
+    float pos[3];
+    GetClientAbsOrigin(client, pos);
 
-    int pitch = SNDPITCH_NORMAL;               // 100
-    if (HasVoicesFromBelow(client) || g_cvForcePitch.BoolValue)
-    {
-        pitch = RoundToNearest(100.0 * mul);
-        if (pitch < 1)   pitch = 1;            // engine bounds
-        if (pitch > 255) pitch = 255;
-    }
-
-    // Emit as player's voice so pitch takes effect consistently
-    EmitSound(recips, n, sample, client, SNDCHAN_VOICE, SNDLEVEL_NORMAL, SND_NOFLAGS,
-              JUMP_VO_VOLUME, pitch);
+    // Play as world sound at the jumper's origin to filtered recipients
+    EmitSound(recips, n, sample, SOUND_FROM_WORLD, SNDCHAN_AUTO, SNDLEVEL_NORMAL, SND_NOFLAGS, JUMP_VO_VOLUME, SNDPITCH_NORMAL, -1, pos);
 }
 
 // ---------------------------------------------------------------------
