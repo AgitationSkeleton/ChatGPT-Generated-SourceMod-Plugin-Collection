@@ -1,0 +1,8 @@
+name: StatusWebhook
+main: StatusWebhook
+version: 1.0.0
+author: ChatGPT
+commands:
+  testwebhook:
+    description: Force-send the Discord status webhook (ops only, only if players are online).
+    usage: /testwebhook
