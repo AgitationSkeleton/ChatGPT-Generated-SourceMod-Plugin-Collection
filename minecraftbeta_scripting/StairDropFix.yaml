@@ -1,0 +1,5 @@
+name: StairDropFix
+main: StairDropFix
+version: 1.0
+author: ChatGPT
+description: Forces stair blocks to always drop themselves when broken by players.

@@ -31,7 +31,7 @@ public class IndevHellGen extends JavaPlugin {
     // Mob spawn tuning (more reasonable / vanilla-like)
     private static final int MOB_SCAN_RADIUS = 80;
     private static final int MAX_LIVING_NEARBY = 50;
-    private static final int SPAWN_ATTEMPTS_PER_PLAYER = 3;
+    private static final int SPAWN_ATTEMPTS_PER_PLAYER = 4; // was 3
     private static final int SPAWN_RADIUS = 40;
     private static final int MIN_SPAWN_DISTANCE = 24;
 
@@ -77,7 +77,8 @@ public class IndevHellGen extends JavaPlugin {
     /**
      * Periodic spawn logic for Indev Hell worlds:
      * - Passive mobs on grass/dirt regardless of light level.
-     * - Reasonable hostiles: zombies, skeletons, spiders, creepers, pigmen, Monster, rare ghasts.
+     * - Overworld-style hostiles as the main danger.
+     * - Pig zombies / ghasts / Monster are rarer.
      * - Giants extremely rare, spider jockeys rare.
      */
     private void performHellWorldSpawns() {
@@ -167,16 +168,17 @@ public class IndevHellGen extends JavaPlugin {
 
         int roll = spawnRandom.nextInt(100);
 
+        // 70% of our custom spawns are passive, 30% hostile
         if (roll < 70) {
-            // Mostly passive animals
             CreatureType passiveType = pickPassiveCreature();
             world.spawnCreature(spawnLoc, passiveType);
             return;
         }
 
-        // Hostile / Nether / special mobs
-        // Giants: extremely rare (about 0.2% of hostile attempts)
-        if (spawnRandom.nextInt(500) == 0) {
+        // Hostile / special mobs (30% of attempts only)
+
+        // Giants: extremely rare (about 0.05% of hostile attempts)
+        if (spawnRandom.nextInt(2000) == 0) {
             try {
                 world.spawnCreature(spawnLoc, CreatureType.GIANT);
             } catch (Throwable t) {
@@ -185,8 +187,8 @@ public class IndevHellGen extends JavaPlugin {
             return;
         }
 
-        // Spider jockeys: rare (~1% of hostile attempts)
-        if (spawnRandom.nextInt(100) == 0) {
+        // Spider jockeys: rare (~0.25% of hostile attempts)
+        if (spawnRandom.nextInt(400) == 0) {
             spawnSpiderJockey(world, spawnLoc);
             return;
         }
@@ -243,22 +245,31 @@ public class IndevHellGen extends JavaPlugin {
     private CreatureType pickHellCreature(int surfaceY) {
         int r = spawnRandom.nextInt(100);
 
-        // Balance of overworld-style and Nether-style hostiles
-        if (r < 30) {
+        // Overworld-style hostiles dominate:
+        // 35% zombie, 30% skeleton, 15% spider, 10% creeper, 5% slime = 95% total
+        if (r < 35) {
             return CreatureType.ZOMBIE;
-        } else if (r < 55) {
+        } else if (r < 65) { // +30
             return CreatureType.SKELETON;
-        } else if (r < 70) {
+        } else if (r < 80) { // +15
             return CreatureType.SPIDER;
-        } else if (r < 80) {
+        } else if (r < 90) { // +10
             return CreatureType.CREEPER;
-        } else if (r < 90) {
-            return CreatureType.PIG_ZOMBIE;
-        } else if (r < 95) {
-            // Your custom Monster; drops handled in your other plugin
+        } else if (r < 95) { // +5
+            return CreatureType.SLIME;
+        }
+
+        // Remaining 5%: "Hell specials"
+        // We keep these low because Nether env already spawns pigmen/ghasts.
+        int special = spawnRandom.nextInt(100);
+        if (special < 40) {
+            // ~2% of all hostiles = Monster; drops handled in your other plugin
             return CreatureType.MONSTER;
+        } else if (special < 80) {
+            // ~2% pig zombies from our spawner; Nether env will add more naturally
+            return CreatureType.PIG_ZOMBIE;
         } else {
-            // Rare ghasts; require some headroom
+            // ~1% ghasts from our spawner, only if there's room; env will also spawn them
             if (surfaceY > 50) {
                 return CreatureType.GHAST;
             } else {
@@ -283,7 +294,7 @@ public class IndevHellGen extends JavaPlugin {
      * - Thin lava floor (y=1–2)
      * - Normal underground stone, caves, ores, dungeons
      * - Lava at sea level (y=64) instead of water, between islands
-     * - Grass tops on islands, with dirt beneath
+     * - Top layer is mostly dirt; grass will be added only near lava shorelines.
      */
     public static class IndevHellChunkGenerator extends ChunkGenerator {
 
@@ -340,17 +351,13 @@ public class IndevHellGen extends JavaPlugin {
                         }
                     }
 
-                    // Top skin: convert top few solid stone blocks into dirt/grass
+                    // Top skin: convert top few solid stone blocks into dirt (no automatic grass)
                     int dirtPlaced = 0;
                     for (int y = terrainHeight; y >= 3 && dirtPlaced < 4; y--) {
                         byte current = getBlock(blocks, x, y, z);
                         if (current == stoneId) {
-                            if (dirtPlaced == 0) {
-                                // topmost block: grass
-                                setBlock(blocks, x, y, z, grassId);
-                            } else {
-                                setBlock(blocks, x, y, z, dirtId);
-                            }
+                            // All top skin is dirt; grass will be added later at lava shorelines
+                            setBlock(blocks, x, y, z, dirtId);
                             dirtPlaced++;
                         } else if (current != airId) {
                             // Hit something else solid (lava, etc.) – stop
@@ -514,7 +521,7 @@ public class IndevHellGen extends JavaPlugin {
 
     /**
      * Lava lakes / puddles on the surface.
-     * Carves a shallow bowl and fills with lava, with sand/gravel shores.
+     * Carves a shallow bowl and fills with lava, with sand/gravel/grass shores.
      */
     public static class IndevHellLavaLakePopulator extends BlockPopulator {
 
@@ -565,7 +572,7 @@ public class IndevHellGen extends JavaPlugin {
                 }
             }
 
-            // Shoreline: sand / gravel around the rim
+            // Shoreline: sand / gravel / grass around the rim
             for (int dx = -radius - 2; dx <= radius + 2; dx++) {
                 for (int dz = -radius - 2; dz <= radius + 2; dz++) {
                     double dist = Math.sqrt(dx * dx + dz * dz);
@@ -582,12 +589,18 @@ public class IndevHellGen extends JavaPlugin {
 
                     Block block = world.getBlockAt(worldX, y, worldZ);
                     Material type = block.getType();
-                    if (type == Material.STONE || type == Material.DIRT || type == Material.GRASS) {
-                        if (random.nextBoolean()) {
-                            block.setType(Material.SAND);
-                        } else {
-                            block.setType(Material.GRAVEL);
-                        }
+                    if (type != Material.STONE && type != Material.DIRT) {
+                        continue;
+                    }
+
+                    int r = random.nextInt(100);
+                    if (r < 40) {
+                        block.setType(Material.SAND);
+                    } else if (r < 80) {
+                        block.setType(Material.GRAVEL);
+                    } else {
+                        // some grassy shoreline right next to lava lakes
+                        block.setType(Material.GRASS);
                     }
                 }
             }
@@ -664,7 +677,7 @@ public class IndevHellGen extends JavaPlugin {
             // Leaf layers:
             // top layer: +1 above trunk, radius 1
             // middle layer: at trunk top, radius 2
-            // lower layer: one below, radius 1-2
+            // lower layer: one below, radius 1
             placeLeafLayer(world, x, topY + 1, z, 1);
             placeLeafLayer(world, x, topY, z, 2);
             placeLeafLayer(world, x, topY - 1, z, 1);
@@ -691,7 +704,7 @@ public class IndevHellGen extends JavaPlugin {
     /**
      * Surface decoration:
      * - Mushrooms and flowers on grass/dirt.
-     * - Sand and gravel near lava shorelines at sea level.
+     * - Sand, gravel, and some grass near lava shorelines at sea level.
      */
     public static class IndevHellSurfacePopulator extends BlockPopulator {
 
@@ -741,7 +754,7 @@ public class IndevHellGen extends JavaPlugin {
                 }
             }
 
-            // Sand / gravel along the main lava ocean shoreline at sea level
+            // Sand / gravel / grass along the main lava ocean shoreline at sea level
             int shoreTries = 24;
             for (int i = 0; i < shoreTries; i++) {
                 int worldX = baseX + random.nextInt(16);
@@ -754,7 +767,7 @@ public class IndevHellGen extends JavaPlugin {
 
                 Block block = world.getBlockAt(worldX, y, worldZ);
                 Material type = block.getType();
-                if (type != Material.STONE && type != Material.DIRT && type != Material.GRASS) {
+                if (type != Material.STONE && type != Material.DIRT) {
                     continue;
                 }
 
@@ -762,10 +775,14 @@ public class IndevHellGen extends JavaPlugin {
                     continue;
                 }
 
-                if (random.nextBoolean()) {
+                int r = random.nextInt(100);
+                if (r < 35) {
                     block.setType(Material.SAND);
-                } else {
+                } else if (r < 70) {
                     block.setType(Material.GRAVEL);
+                } else {
+                    // Grass right on some lava shore edges: classic Indev look
+                    block.setType(Material.GRASS);
                 }
             }
         }

@@ -1,4 +1,6 @@
 import java.util.logging.Logger;
+import java.util.HashMap;
+import java.util.Map;
 
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -20,6 +22,7 @@ import org.bukkit.event.Event.Priority;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityListener;
 
 import org.bukkit.plugin.PluginManager;
@@ -35,7 +38,13 @@ public class SimpleDeathMessages extends JavaPlugin {
     @Override
     public void onEnable() {
         PluginManager pm = getServer().getPluginManager();
+
+        // Track last damage events
         pm.registerEvent(Event.Type.ENTITY_DAMAGE, entityListener, Priority.Highest, this);
+
+        // Fire when an entity actually dies
+        pm.registerEvent(Event.Type.ENTITY_DEATH, entityListener, Priority.Monitor, this);
+
         log.info("[SimpleDeathMessages] Enabled.");
     }
 
@@ -47,6 +56,10 @@ public class SimpleDeathMessages extends JavaPlugin {
     private static class SimpleDeathMessagesEntityListener extends EntityListener {
 
         private final SimpleDeathMessages plugin;
+
+        // Track last damage event per player
+        private final Map<String, EntityDamageEvent> lastDamageByPlayer =
+                new HashMap<String, EntityDamageEvent>();
 
         public SimpleDeathMessagesEntityListener(SimpleDeathMessages plugin) {
             this.plugin = plugin;
@@ -64,18 +77,36 @@ public class SimpleDeathMessages extends JavaPlugin {
 
             Player player = (Player) event.getEntity();
 
-            int damage = event.getDamage();
-            int health = player.getHealth();
+            // Just remember the last damage event; do NOT try to predict death here.
+            lastDamageByPlayer.put(player.getName(), event);
+        }
 
-            // Only care about lethal hits
-            if (health > damage) {
+        @Override
+        public void onEntityDeath(EntityDeathEvent event) {
+            Entity dead = event.getEntity();
+            if (!(dead instanceof Player)) {
                 return;
             }
 
-            String deathMessage = getDeathMessage(player, event);
+            Player player = (Player) dead;
+            String playerName = player.getName();
+
+            EntityDamageEvent lastDamage = lastDamageByPlayer.get(playerName);
+
+            String deathMessage;
+            if (lastDamage != null) {
+                deathMessage = getDeathMessage(player, lastDamage);
+            } else {
+                // No recorded damage cause; generic fallback
+                deathMessage = playerName + " died";
+            }
+
             if (deathMessage != null && deathMessage.length() > 0) {
                 plugin.getServer().broadcastMessage(deathMessage);
             }
+
+            // Clean up after ourselves
+            lastDamageByPlayer.remove(playerName);
         }
 
         private String getDeathMessage(Player player, EntityDamageEvent lastDamage) {

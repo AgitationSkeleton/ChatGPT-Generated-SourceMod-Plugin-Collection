@@ -1,5 +1,7 @@
 import java.util.Random;
 import java.util.logging.Logger;
+import java.util.HashSet;
+import java.util.Set;
 
 import org.bukkit.World;
 import org.bukkit.World.Environment;
@@ -21,6 +23,10 @@ public class PeopleOfTheNether extends JavaPlugin implements Listener {
     private final Logger logger = Logger.getLogger("Minecraft");
     private final Random random = new Random();
 
+    // Track only the Monsters (mob id 49) that *we* spawn,
+    // so we don't touch any other mobs.
+    private final Set<Integer> trackedMonsterIds = new HashSet<Integer>();
+
     @Override
     public void onEnable() {
         getServer().getPluginManager().registerEvents(this, this);
@@ -29,6 +35,7 @@ public class PeopleOfTheNether extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        trackedMonsterIds.clear();
         logger.info("[PeopleOfTheNether] Disabled.");
     }
 
@@ -62,34 +69,41 @@ public class PeopleOfTheNether extends JavaPlugin implements Listener {
         Location spawnLocation = entity.getLocation();
         event.setCancelled(true);
 
-        // Poseidon should support CreatureType.MONSTER for mob id 49
-        world.spawnCreature(spawnLocation, CreatureType.MONSTER);
+        // Poseidon should support CreatureType.MONSTER for mob id 49 (Steve-like human)
+        LivingEntity spawned = world.spawnCreature(spawnLocation, CreatureType.MONSTER);
+
+        // Track this specific Monster so we can give it custom drops later
+        if (spawned != null) {
+            trackedMonsterIds.add(spawned.getEntityId());
+        }
     }
 
     /**
-     * Custom drops for Monsters that die in the Nether:
+     * Custom drops for the specific Monsters (mob id 49) that this plugin spawned:
      *  - 0–2 string
      *  - 0–2 feathers
      *  - 0–2 gunpowder
      *  - 0–1 flint and steel
-     *
-     * We try to target specifically the Monster mob (id 49) by using
-     * the runtime class name "Monster", which Poseidon uses for this mob.
      */
     @EventHandler
     public void onEntityDeath(EntityDeathEvent event) {
-        // Old Beta API returns Entity here, so cast to LivingEntity
-        LivingEntity entity = (LivingEntity) event.getEntity();
+        Entity rawEntity = event.getEntity();
+
+        if (!(rawEntity instanceof LivingEntity)) {
+            return;
+        }
+
+        LivingEntity entity = (LivingEntity) rawEntity;
         World world = entity.getWorld();
 
         if (world.getEnvironment() != Environment.NETHER) {
             return;
         }
 
-        // Try to only affect the special Monster mob (id 49) and not
-        // every hostile mob. Poseidon uses a "Monster" class for this.
-        String entityClassName = entity.getClass().getSimpleName();
-        if (!"Monster".equals(entityClassName)) {
+        int entityId = entity.getEntityId();
+
+        // Only modify drops if this is one of "our" Monsters
+        if (!trackedMonsterIds.remove(entityId)) {
             return;
         }
 

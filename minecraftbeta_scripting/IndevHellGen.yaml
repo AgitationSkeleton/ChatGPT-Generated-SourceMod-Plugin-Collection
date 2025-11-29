@@ -1,6 +1,6 @@
 name: IndevHellGen
 main: IndevHellGen
-version: 1.4.0
+version: 1.4.1
 author: ChatGPT
 load: startup
 description: Indev-style Hell world generator for Beta 1.7.3 Poseidon with lava seas, caves, ores, dungeons, Indev houses, and tuned mob spawning.
