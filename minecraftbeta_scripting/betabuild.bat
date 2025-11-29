@@ -8,11 +8,14 @@ REM  - Assumes matching .yaml with the same base name
 REM  - Produces <BaseName>.jar in the same folder
 REM ============================================================================
 
+REM Remember if we got an argument (typical for drag & drop)
+set "IS_DRAGDROP="
+if not "%~1"=="" set "IS_DRAGDROP=1"
+
 REM No argument? Tell user what to do and bail.
 if "%~1"=="" (
     echo Drag a plugin .java file onto this batch file to build it.
-    pause
-    goto :EOF
+    goto :finish
 )
 
 REM Working directory = folder where this .bat lives
@@ -39,8 +42,7 @@ mkdir "%OUT_DIR%"
 REM Sanity check: metadata yaml
 if not exist "%YAML_FILE%" (
     echo [ERROR] Metadata YAML "%YAML_FILE%" not found in "%WORK_DIR%".
-    pause
-    goto :EOF
+    goto :finish
 )
 
 REM Java sources to compile: ONLY the plugin you dropped
@@ -60,8 +62,7 @@ javac -source 8 -target 8 -cp "%BUKKIT_JAR%" -d "%OUT_DIR%" "%TARGET_JAVA%"
 if errorlevel 1 (
     echo.
     echo [ERROR] Compilation failed. See messages above.
-    pause
-    goto :EOF
+    goto :finish
 )
 
 REM Copy metadata to plugin.yml
@@ -76,5 +77,14 @@ echo.
 echo Build complete: "%WORK_DIR%%JAR_NAME%.jar"
 echo.
 
-pause
+:finish
+echo.
+echo Build script finished.
+echo.
+
+REM If launched via drag & drop (i.e., new cmd /c), drop to an interactive shell
+if defined IS_DRAGDROP (
+    cmd /k
+)
+
 endlocal

@@ -1,0 +1,5 @@
+name: SimpleDeathMessages
+main: SimpleDeathMessages
+version: 1.0
+description: Plaintext modern-style death messages for Beta 1.7.3 Poseidon, with Herobrine for Monster.
+load: POSTWORLD

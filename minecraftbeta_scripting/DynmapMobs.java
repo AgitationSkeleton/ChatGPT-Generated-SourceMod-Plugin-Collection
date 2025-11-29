@@ -335,6 +335,14 @@ public class DynmapMobs extends JavaPlugin {
      * Map a Bukkit entity to our internal mob key string.
      */
     private String getMobKey(Entity entity) {
+        // Fallback based on the underlying class name as a safety net
+        String className = entity.getClass().getSimpleName().toLowerCase();
+
+        // Pig Zombie / Zombie Pigman / whatever Poseidon calls it
+        if (entity instanceof PigZombie || (className.contains("pig") && className.contains("zomb"))) {
+            return "PIG_ZOMBIE";
+        }
+
         if (entity instanceof Creeper) {
             return "CREEPER";
         }
@@ -352,9 +360,6 @@ public class DynmapMobs extends JavaPlugin {
         }
         if (entity instanceof Ghast) {
             return "GHAST";
-        }
-        if (entity instanceof PigZombie) {
-            return "PIG_ZOMBIE";
         }
         if (entity instanceof Pig) {
             return "PIG";
