@@ -48,8 +48,8 @@ public class DynmapMobs extends JavaPlugin {
     private MarkerAPI markerApi;
     private MarkerSet mobMarkerSet;
 
-    // Map from entityId -> Marker
-    private final Map<Integer, Marker> mobMarkers = new HashMap<Integer, Marker>();
+    // Map from worldName:entityId -> Marker
+    private final Map<String, Marker> mobMarkers = new HashMap<String, Marker>();
 
     // Map from mob key -> MarkerIcon id
     private final Map<String, String> mobIconIds = new HashMap<String, String>();
@@ -120,9 +120,9 @@ public class DynmapMobs extends JavaPlugin {
         }
 
         // Remove markers
-        Iterator<Map.Entry<Integer, Marker>> it = mobMarkers.entrySet().iterator();
+        Iterator<Map.Entry<String, Marker>> it = mobMarkers.entrySet().iterator();
         while (it.hasNext()) {
-            Map.Entry<Integer, Marker> entry = it.next();
+            Map.Entry<String, Marker> entry = it.next();
             Marker m = entry.getValue();
             if (m != null) {
                 m.deleteMarker();
@@ -260,7 +260,8 @@ public class DynmapMobs extends JavaPlugin {
             return;
         }
 
-        Set<Integer> seenEntityIds = new HashSet<Integer>();
+        // Track which markers we saw this tick, using worldName:entityId
+        Set<String> seenKeys = new HashSet<String>();
 
         for (World world : getServer().getWorlds()) {
             String worldName = world.getName();
@@ -280,7 +281,8 @@ public class DynmapMobs extends JavaPlugin {
                 }
 
                 int entityId = entity.getEntityId();
-                seenEntityIds.add(entityId);
+                String markerKey = worldName + ":" + entityId;
+                seenKeys.add(markerKey);
 
                 String iconId = getIconIdForMobKey(mobKey);
 
@@ -299,14 +301,14 @@ public class DynmapMobs extends JavaPlugin {
                 double y = loc.getY();
                 double z = loc.getZ();
 
-                Marker marker = mobMarkers.get(entityId);
+                Marker marker = mobMarkers.get(markerKey);
                 if (marker == null) {
                     // Create new marker
-                    String markerId = "dynmap_mobs.entity_" + entityId;
+                    String markerId = "dynmap_mobs." + worldName + ".entity_" + entityId;
                     String label = getLabelForMobKey(mobKey);
 
                     marker = mobMarkerSet.createMarker(markerId, label, worldName, x, y, z, icon, false);
-                    mobMarkers.put(entityId, marker);
+                    mobMarkers.put(markerKey, marker);
                 } else {
                     // Update existing marker position
                     marker.setLocation(worldName, x, y, z);
@@ -314,12 +316,12 @@ public class DynmapMobs extends JavaPlugin {
             }
         }
 
-        // Remove markers for entities no longer present
-        Iterator<Map.Entry<Integer, Marker>> it = mobMarkers.entrySet().iterator();
+        // Remove markers for entities no longer present (in any world)
+        Iterator<Map.Entry<String, Marker>> it = mobMarkers.entrySet().iterator();
         while (it.hasNext()) {
-            Map.Entry<Integer, Marker> entry = it.next();
-            int entityId = entry.getKey();
-            if (!seenEntityIds.contains(entityId)) {
+            Map.Entry<String, Marker> entry = it.next();
+            String markerKey = entry.getKey();
+            if (!seenKeys.contains(markerKey)) {
                 Marker marker = entry.getValue();
                 if (marker != null) {
                     marker.deleteMarker();
