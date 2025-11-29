@@ -138,11 +138,10 @@ public class SimpleDeathMessages extends JavaPlugin {
                 case SUICIDE:
                     // /kill
                     return playerName + " committed suicide";
-
-                default:
-                    // Catch-all
-                    return playerName + " died";
             }
+
+            // Final catch-all "else" for any unhandled death cause
+            return playerName + " died";
         }
 
         /**
