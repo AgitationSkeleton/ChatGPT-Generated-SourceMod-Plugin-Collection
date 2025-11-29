@@ -1,0 +1,5 @@
+name: BoatDrop
+main: BoatDrop
+version: 1.0
+author: ChatGPT
+description: Makes broken boats drop a boat item instead of planks and sticks.
