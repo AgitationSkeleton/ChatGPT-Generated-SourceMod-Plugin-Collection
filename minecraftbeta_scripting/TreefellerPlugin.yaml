@@ -1,0 +1,16 @@
+name: Treefeller
+main: net.redchanit.treefeller.TreefellerPlugin
+version: 1.1
+description: Simple tree feller for Beta 1.7.3 / Project Poseidon.
+load: POSTWORLD
+
+commands:
+  treefeller:
+    description: Toggle Treefeller on or off for yourself.
+    usage: /treefeller
+  treefellerinfo:
+    description: Toggle Treefeller durability info for yourself.
+    usage: /treefellerinfo
+  treefellercrouch:
+    description: Toggle whether sneaking prevents Treefeller from activating.
+    usage: /treefellercrouch

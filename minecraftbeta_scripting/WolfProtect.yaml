@@ -1,0 +1,8 @@
+name: WolfProtect
+main: com.redchanit.wolfprotect.WolfProtect
+version: 1.0
+description: Prevents players from damaging their own tamed wolves unless toggled off.
+commands:
+  wolfprotect:
+    description: Toggle protection so you cannot hurt your own tamed wolves.
+    usage: /<command>
