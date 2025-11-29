@@ -1,0 +1,5 @@
+name: DiscordBridge
+main: com.example.discordbridge.DiscordBridge
+version: 1.0.0
+description: Relays Minecraft chat/events to Discord and back.
+author: ChatGPT
