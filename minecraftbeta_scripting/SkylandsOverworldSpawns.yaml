@@ -1,0 +1,6 @@
+name: SkylandsOverworldSpawns
+main: SkylandsOverworldSpawns
+version: 1.0.0
+author: ChatGPT
+description: "Makes Sky Dimension / Skylands use Overworld-like mob spawn rules in Beta 1.7.3."
+load: POSTWORLD

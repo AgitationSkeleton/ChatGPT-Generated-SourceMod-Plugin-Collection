@@ -1,221 +1,80 @@
 @echo off
-setlocal ENABLEDELAYEDEXPANSION
+setlocal
 
-REM ============================================================
-REM  Generic Bukkit plugin builder for Beta 1.7.3-style plugins
-REM  - Multiple plugins in the same directory (Treefeller, WolfProtect, etc.)
-REM  - The file you drag onto the .bat decides which plugin is built:
-REM      TreefellerPlugin.java   -> compile TreefellerPlugin.java
-REM      TreefellerPlugin.yaml   -> compile TreefellerPlugin.java (if present)
-REM  - Metadata:
-REM      Prefer <BaseName>.yaml / <BaseName>.yml
-REM      Then plugin.yml
-REM      Then first *.yaml / *.yml in the folder
-REM ============================================================
+REM ============================================================================
+REM  Beta 1.7.3 Plugin Builder (drag & drop)
+REM  - Drop a single .java file onto this .bat
+REM  - Assumes matching .yaml with the same base name
+REM  - Produces <BaseName>.jar in the same folder
+REM ============================================================================
 
-REM --- Where this script lives (used to find server.jar) ---
-set "SCRIPT_DIR=%~dp0"
-
-REM --- Detect plugin directory and base name ---
-set "PLUGIN_DIR="
-set "PLUGIN_BASENAME="
-
+REM No argument? Tell user what to do and bail.
 if "%~1"=="" (
-    REM No argument: use directory of the .bat itself
-    set "PLUGIN_DIR=%SCRIPT_DIR%"
-) else (
-    if exist "%~1\" (
-        REM A folder was dropped
-        set "PLUGIN_DIR=%~1"
-        for %%I in ("%~1") do set "PLUGIN_BASENAME=%%~nI"
-    ) else (
-        REM A file was dropped; use its parent directory and file base name
-        set "PLUGIN_DIR=%~dp1"
-        for %%I in ("%~1") do set "PLUGIN_BASENAME=%%~nI"
-    )
-)
-
-REM Normalize: remove trailing backslash if present
-if "%PLUGIN_DIR:~-1%"=="\" set "PLUGIN_DIR=%PLUGIN_DIR:~0,-1%"
-
-pushd "%PLUGIN_DIR%" >nul
-
-echo Working directory: "%PLUGIN_DIR%"
-if defined PLUGIN_BASENAME echo Target plugin base: "%PLUGIN_BASENAME%"
-echo.
-
-REM --- Locate Bukkit/CraftBukkit server jar ---
-set "BUKKIT_JAR=%SCRIPT_DIR%server.jar"
-
-if not exist "%BUKKIT_JAR%" (
-    for %%F in ("%SCRIPT_DIR%craftbukkit*.jar") do (
-        set "BUKKIT_JAR=%%F"
-        goto :have_bukkit
-    )
-)
-
-:have_bukkit
-if not exist "%BUKKIT_JAR%" (
-    echo [ERROR] Could not find server.jar or craftbukkit*.jar next to this .bat.
-    echo Edit this script and set BUKKIT_JAR to your Bukkit jar path manually.
-    echo.
+    echo Drag a plugin .java file onto this batch file to build it.
     pause
-    popd
-    exit /b 1
+    goto :EOF
 )
 
+REM Working directory = folder where this .bat lives
+set "WORK_DIR=%~dp0"
+cd /d "%WORK_DIR%"
+
+REM Target plugin main file (what you dropped)
+set "TARGET_JAVA=%~nx1"
+set "TARGET_BASE=%~n1"
+
+REM Paths
+set "BUKKIT_JAR=%WORK_DIR%server.jar"
+set "OUT_DIR=%WORK_DIR%build"
+set "JAR_NAME=%TARGET_BASE%"
+set "YAML_FILE=%TARGET_BASE%.yaml"
+
+echo Working directory: "%WORK_DIR%"
+echo Target plugin base: "%TARGET_BASE%"
+
+REM Clean old build dir
+if exist "%OUT_DIR%" rd /s /q "%OUT_DIR%"
+mkdir "%OUT_DIR%"
+
+REM Sanity check: metadata yaml
+if not exist "%YAML_FILE%" (
+    echo [ERROR] Metadata YAML "%YAML_FILE%" not found in "%WORK_DIR%".
+    pause
+    goto :EOF
+)
+
+REM Java sources to compile: ONLY the plugin you dropped
+echo Java sources to compile:  "%WORK_DIR%%TARGET_JAVA%"
+
+echo.
 echo Using Bukkit JAR: "%BUKKIT_JAR%"
-echo.
-
-REM --- Collect Java files for THIS plugin ---
-set "JAVA_FILES="
-
-if defined PLUGIN_BASENAME (
-    set "TARGET_JAVA=%PLUGIN_DIR%\%PLUGIN_BASENAME%.java"
-    if exist "%TARGET_JAVA%" (
-        REM Compile only this plugin's main source file, like spcomp
-        set "JAVA_FILES=\"%TARGET_JAVA%\""
-    )
-)
-
-REM Fallback: if we didn't find a specific target, compile all .java (old behavior)
-if not defined JAVA_FILES (
-    for /R "%PLUGIN_DIR%" %%F in (*.java) do (
-        set "JAVA_FILES=!JAVA_FILES! "%%F""
-    )
-)
-
-if not defined JAVA_FILES (
-    echo [ERROR] No .java files found under "%PLUGIN_DIR%".
-    echo Make sure your source files are there.
-    echo.
-    pause
-    popd
-    exit /b 1
-)
-
-echo Java sources to compile: %JAVA_FILES%
-echo.
-
-REM --- Find metadata file: prefer matching base name, then generic ---
-set "PLUGIN_META_SRC="
-
-if defined PLUGIN_BASENAME (
-    if exist "%PLUGIN_DIR%\%PLUGIN_BASENAME%.yaml" set "PLUGIN_META_SRC=%PLUGIN_DIR%\%PLUGIN_BASENAME%.yaml"
-    if not defined PLUGIN_META_SRC if exist "%PLUGIN_DIR%\%PLUGIN_BASENAME%.yml" set "PLUGIN_META_SRC=%PLUGIN_DIR%\%PLUGIN_BASENAME%.yml"
-)
-
-REM If still not set, prefer plugin.yml
-if not defined PLUGIN_META_SRC (
-    if exist "plugin.yml" set "PLUGIN_META_SRC=%PLUGIN_DIR%\plugin.yml"
-)
-
-REM If there is still no metadata, pick first *.yaml then *.yml
-if not defined PLUGIN_META_SRC (
-    for %%F in ("%PLUGIN_DIR%\*.yaml") do (
-        set "PLUGIN_META_SRC=%%F"
-        goto :have_meta
-    )
-)
-
-if not defined PLUGIN_META_SRC (
-    for %%F in ("%PLUGIN_DIR%\*.yml") do (
-        set "PLUGIN_META_SRC=%%F"
-        goto :have_meta
-    )
-)
-
-:have_meta
-
-if not defined PLUGIN_META_SRC (
-    echo [WARNING] No plugin.yml or *.yaml/*.yml found in "%PLUGIN_DIR%".
-    echo The jar will build but will NOT be a valid Bukkit plugin without metadata.
-    echo.
-) else (
-    echo Using metadata file: "%PLUGIN_META_SRC%"
-    echo.
-)
-
-REM --- Determine JAR name ---
-set "JAR_NAME="
-
-REM Try to read name: from the metadata file
-if defined PLUGIN_META_SRC (
-    for /f "tokens=1* delims=:" %%A in ('findstr /b /i "name:" "%PLUGIN_META_SRC%"') do (
-        set "JAR_NAME=%%B"
-        goto :got_name
-    )
-)
-
-:got_name
-REM Trim leading spaces from JAR_NAME if set
-if defined JAR_NAME (
-    for /f "tokens=* delims= " %%A in ("%JAR_NAME%") do set "JAR_NAME=%%A"
-)
-
-REM Fallback: use plugin base name, then folder name
-if not defined JAR_NAME (
-    if defined PLUGIN_BASENAME (
-        set "JAR_NAME=%PLUGIN_BASENAME%"
-    ) else (
-        for %%I in ("%PLUGIN_DIR%") do set "JAR_NAME=%%~nI"
-    )
-)
-
+echo Using metadata file: "%YAML_FILE%"
 echo Output JAR name will be: "%JAR_NAME%.jar"
 echo.
-
-REM --- Prepare build output directory ---
-set "OUT_DIR=%PLUGIN_DIR%\build"
-
-if exist "%OUT_DIR%" (
-    echo Cleaning old build directory...
-    rd /s /q "%OUT_DIR%"
-)
-mkdir "%OUT_DIR%" >nul
-
-REM --- Compile .java files ---
 echo Compiling Java sources...
 echo (This may take a moment)
 echo.
 
-javac -source 8 -target 8 -cp "%BUKKIT_JAR%" -d "%OUT_DIR%" %JAVA_FILES%
+REM Compile just this one plugin main class
+javac -source 8 -target 8 -cp "%BUKKIT_JAR%" -d "%OUT_DIR%" "%TARGET_JAVA%"
 if errorlevel 1 (
     echo.
     echo [ERROR] Compilation failed. See messages above.
-    echo.
     pause
-    popd
-    exit /b 1
+    goto :EOF
 )
 
-echo.
-echo Compilation successful.
-echo.
+REM Copy metadata to plugin.yml
+copy /Y "%YAML_FILE%" "%OUT_DIR%\plugin.yml" >nul
 
-REM --- Stage plugin.yml inside OUT_DIR ---
-if defined PLUGIN_META_SRC (
-    copy /Y "%PLUGIN_META_SRC%" "%OUT_DIR%\plugin.yml" >nul
-)
-
-REM --- Create the plugin JAR in the plugin directory ---
-echo Creating JAR: "%JAR_NAME%.jar"
-
-jar cf "%JAR_NAME%.jar" -C "%OUT_DIR%" .
-
-if errorlevel 1 (
-    echo.
-    echo [ERROR] jar command failed.
-    echo.
-    pause
-    popd
-    exit /b 1
-)
+REM Build the JAR
+pushd "%OUT_DIR%"
+jar cf "%WORK_DIR%%JAR_NAME%.jar" .
+popd
 
 echo.
-echo Done. Output: "%PLUGIN_DIR%\%JAR_NAME%.jar"
+echo Build complete: "%WORK_DIR%%JAR_NAME%.jar"
 echo.
 
-popd >nul
 pause
 endlocal

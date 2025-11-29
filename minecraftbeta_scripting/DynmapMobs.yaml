@@ -1,0 +1,6 @@
+name: DynmapMobs
+main: com.redchanit.dynmapmobs.DynmapMobs
+version: 1.0
+author: Max
+description: Shows mobs on Dynmap using Minecraft Wiki sprites (Beta 1.7.3 Poseidon).
+depend: [dynmap]
