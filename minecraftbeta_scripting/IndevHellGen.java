@@ -264,13 +264,15 @@ public class IndevHellGen extends JavaPlugin {
      * - Lava ocean at y < LAVA_LEVEL
      * - Overworld-ish terrain above lava
      * - Top layer is always dirt (no grass)
+     * - Extra vertical variation and simple cave carving
      */
     public static class IndevHellChunkGenerator extends ChunkGenerator {
 
         private static final int WORLD_HEIGHT = 128;
         private static final int LAVA_LEVEL   = 32;
-        private static final int BASE_HEIGHT  = 64;
+        private static final int BASE_HEIGHT  = 70; // slightly higher average to allow taller peaks
 
+        private final byte airId    = 0;
         private final byte bedrockId = (byte) Material.BEDROCK.getId();
         private final byte stoneId   = (byte) Material.STONE.getId();
         private final byte dirtId    = (byte) Material.DIRT.getId();
@@ -293,8 +295,8 @@ public class IndevHellGen extends JavaPlugin {
                     if (terrainHeight < LAVA_LEVEL + 4) {
                         terrainHeight = LAVA_LEVEL + 4;
                     }
-                    if (terrainHeight > WORLD_HEIGHT - 4) {
-                        terrainHeight = WORLD_HEIGHT - 4;
+                    if (terrainHeight > WORLD_HEIGHT - 5) {
+                        terrainHeight = WORLD_HEIGHT - 5;
                     }
 
                     // y = 0: bedrock
@@ -305,19 +307,30 @@ public class IndevHellGen extends JavaPlugin {
                         setBlock(blocks, x, y, z, lavaId);
                     }
 
-                    // y = LAVA_LEVEL .. terrainHeight: solid ground
+                    // y = LAVA_LEVEL .. terrainHeight: initial solid stone mass
                     for (int y = LAVA_LEVEL; y <= terrainHeight; y++) {
-                        int depthFromTop = terrainHeight - y;
+                        setBlock(blocks, x, y, z, stoneId);
+                    }
 
-                        if (depthFromTop == 0) {
-                            // Very top block: dirt (no grass)
+                    // Simple cave / crevice carving: remove some interior stone
+                    for (int y = LAVA_LEVEL + 3; y <= terrainHeight - 2; y++) {
+                        double caveNoise = getCaveNoise(worldX, y, worldZ, seed);
+                        if (caveNoise > 1.9) {
+                            // Carve out cave
+                            setBlock(blocks, x, y, z, airId);
+                        }
+                    }
+
+                    // Top skin: turn a few topmost stone blocks into dirt
+                    int dirtPlaced = 0;
+                    for (int y = terrainHeight; y >= LAVA_LEVEL && dirtPlaced < 4; y--) {
+                        byte current = getBlock(blocks, x, y, z);
+                        if (current == stoneId) {
                             setBlock(blocks, x, y, z, dirtId);
-                        } else if (depthFromTop <= 3) {
-                            // Top soil: dirt
-                            setBlock(blocks, x, y, z, dirtId);
-                        } else {
-                            // Bulk stone
-                            setBlock(blocks, x, y, z, stoneId);
+                            dirtPlaced++;
+                        } else if (current != airId) {
+                            // Hit something else solid (lava, etc.) – stop
+                            break;
                         }
                     }
                 }
@@ -326,15 +339,38 @@ public class IndevHellGen extends JavaPlugin {
             return blocks;
         }
 
+        /**
+         * Height noise with more variation: plains, hills, and taller peaks.
+         */
         private double getHeightNoise(int worldX, int worldZ, long seed) {
-            double x = worldX / 32.0;
-            double z = worldZ / 32.0;
+            double x = worldX / 40.0;
+            double z = worldZ / 40.0;
 
-            double h1 = Math.sin(x) + Math.cos(z);
-            double h2 = Math.sin(x * 0.7 + z * 0.3 + seed * 0.000001) * 2.5;
-            double h3 = Math.cos(x * 0.2 - z * 0.4 - seed * 0.000001) * 3.0;
+            // Large-scale variation: continents / big hills
+            double h1 = Math.sin(x * 0.7 + seed * 0.000002) * 10.0
+                      + Math.cos(z * 0.7 - seed * 0.000002) * 10.0;
 
-            return h1 * 3.0 + h2 + h3;
+            // Medium-scale bumps
+            double h2 = Math.sin(x * 1.7 + z * 0.6) * 6.0
+                      + Math.cos(z * 1.3 - x * 0.4) * 4.0;
+
+            // Fine detail
+            double h3 = Math.sin(x * 3.5 + z * 3.5 + seed * 0.000005) * 3.0;
+
+            return h1 + h2 + h3; // roughly -23..+23
+        }
+
+        /**
+         * Simple 3D cave noise: when this exceeds a threshold we carve air.
+         */
+        private double getCaveNoise(int worldX, int worldY, int worldZ, long seed) {
+            double x = worldX / 18.0;
+            double y = worldY / 14.0;
+            double z = worldZ / 18.0;
+
+            double c1 = Math.sin(x + seed * 0.00001) + Math.cos(z - seed * 0.00002);
+            double c2 = Math.sin(y * 1.5 + x * 0.5) + Math.cos(y * 1.2 - z * 0.3);
+            return c1 + c2;
         }
 
         private void setBlock(byte[] blocks, int x, int y, int z, byte id) {
@@ -345,12 +381,21 @@ public class IndevHellGen extends JavaPlugin {
             blocks[index] = id;
         }
 
+        private byte getBlock(byte[] blocks, int x, int y, int z) {
+            if (y < 0 || y >= WORLD_HEIGHT) {
+                return 0;
+            }
+            int index = (x * 16 + z) * WORLD_HEIGHT + y;
+            return blocks[index];
+        }
+
         @Override
         public List<BlockPopulator> getDefaultPopulators(World world) {
             List<BlockPopulator> list = new ArrayList<BlockPopulator>();
-            // Order matters a bit: carve dungeons first, then ores, then trees / surface
+            // Order: dungeons -> ores -> lava lakes -> trees -> surface decor
             list.add(new IndevHellDungeonPopulator());
             list.add(new IndevHellOrePopulator());
+            list.add(new IndevHellLavaLakePopulator());
             list.add(new IndevHellTreePopulator());
             list.add(new IndevHellSurfacePopulator());
             return list;
@@ -436,6 +481,99 @@ public class IndevHellGen extends JavaPlugin {
     }
 
     /**
+     * Lava lakes / puddles on the surface.
+     * Carves a shallow bowl and fills with lava, with sand/gravel shores.
+     */
+    public static class IndevHellLavaLakePopulator extends BlockPopulator {
+
+        private static final int WORLD_HEIGHT = 128;
+        private static final int LAVA_LEVEL   = 32;
+
+        @Override
+        public void populate(World world, Random random, Chunk chunk) {
+            // Roughly 1 in 5 chunks gets a lake
+            if (random.nextInt(5) != 0) {
+                return;
+            }
+
+            int baseX = chunk.getX() * 16;
+            int baseZ = chunk.getZ() * 16;
+
+            int centerX = baseX + 4 + random.nextInt(8);  // keep away from chunk edges
+            int centerZ = baseZ + 4 + random.nextInt(8);
+
+            int surfaceY = findSurfaceY(world, centerX, centerZ);
+            if (surfaceY <= LAVA_LEVEL + 3 || surfaceY >= WORLD_HEIGHT - 4) {
+                return;
+            }
+
+            int radius = 2 + random.nextInt(3); // 2–4 block radius
+
+            // Carve bowl
+            for (int dx = -radius - 1; dx <= radius + 1; dx++) {
+                for (int dz = -radius - 1; dz <= radius + 1; dz++) {
+                    double dist = Math.sqrt(dx * dx + dz * dz);
+                    int worldX = centerX + dx;
+                    int worldZ = centerZ + dz;
+
+                    if (dist <= radius + 0.5) {
+                        // Carve 2-deep depression
+                        for (int dy = 0; dy <= 2; dy++) {
+                            int y = surfaceY - dy;
+                            if (y <= LAVA_LEVEL + 1) {
+                                continue;
+                            }
+                            Block block = world.getBlockAt(worldX, y, worldZ);
+                            if (dy == 0) {
+                                block.setType(Material.STATIONARY_LAVA);
+                            } else {
+                                block.setType(Material.AIR);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Shoreline: sand / gravel around the rim
+            for (int dx = -radius - 2; dx <= radius + 2; dx++) {
+                for (int dz = -radius - 2; dz <= radius + 2; dz++) {
+                    double dist = Math.sqrt(dx * dx + dz * dz);
+                    if (dist < radius + 0.8 || dist > radius + 2.0) {
+                        continue;
+                    }
+
+                    int worldX = centerX + dx;
+                    int worldZ = centerZ + dz;
+                    int y = findSurfaceY(world, worldX, worldZ);
+                    if (y <= LAVA_LEVEL + 1 || y >= WORLD_HEIGHT - 1) {
+                        continue;
+                    }
+
+                    Block block = world.getBlockAt(worldX, y, worldZ);
+                    Material type = block.getType();
+                    if (type == Material.STONE || type == Material.DIRT) {
+                        if (random.nextBoolean()) {
+                            block.setType(Material.SAND);
+                        } else {
+                            block.setType(Material.GRAVEL);
+                        }
+                    }
+                }
+            }
+        }
+
+        private int findSurfaceY(World world, int x, int z) {
+            for (int y = WORLD_HEIGHT - 1; y > 0; y--) {
+                Material type = world.getBlockAt(x, y, z).getType();
+                if (type != Material.AIR && type != Material.LEAVES) {
+                    return y;
+                }
+            }
+            return 0;
+        }
+    }
+
+    /**
      * Simple overworld-style tree populator for the dirt islands.
      */
     public static class IndevHellTreePopulator extends BlockPopulator {
@@ -512,7 +650,7 @@ public class IndevHellGen extends JavaPlugin {
     /**
      * Surface decoration:
      * - Mushrooms and flowers on dirt.
-     * - Sand and gravel near lava shorelines.
+     * - Sand and gravel near lava shorelines (the big lava sea).
      */
     public static class IndevHellSurfacePopulator extends BlockPopulator {
 
@@ -561,7 +699,7 @@ public class IndevHellGen extends JavaPlugin {
                 }
             }
 
-            // Sand / gravel along lava shorelines
+            // Sand / gravel along the main lava ocean shoreline
             int shoreTries = 20;
             for (int i = 0; i < shoreTries; i++) {
                 int worldX = baseX + random.nextInt(16);

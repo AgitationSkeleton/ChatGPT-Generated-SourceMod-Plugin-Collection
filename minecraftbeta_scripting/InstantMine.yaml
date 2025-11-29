@@ -1,0 +1,8 @@
+name: InstantMine
+main: InstantMine
+version: 1.0
+author: ChatGPT
+commands:
+  instantmine:
+    description: Toggle instant block breaking for ops.
+    usage: /instantmine
