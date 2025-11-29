@@ -28,12 +28,12 @@ public class IndevHellGen extends JavaPlugin {
     // Names of worlds that are using this generator.
     private static final Set<String> hellWorlds = new HashSet<String>();
 
-    // Mob spawn tuning (more reasonable / vanilla-like)
-    private static final int MOB_SCAN_RADIUS = 80;
-    private static final int MAX_LIVING_NEARBY = 50;
-    private static final int SPAWN_ATTEMPTS_PER_PLAYER = 3;
-    private static final int SPAWN_RADIUS = 40;
-    private static final int MIN_SPAWN_DISTANCE = 24;
+    // Mob spawn tuning
+    private static final int MOB_SCAN_RADIUS = 64;
+    private static final int MAX_LIVING_NEARBY = 40;
+    private static final int SPAWN_ATTEMPTS_PER_PLAYER = 4;
+    private static final int SPAWN_RADIUS = 24;
+    private static final int MIN_SPAWN_DISTANCE = 8;
 
     private final Random spawnRandom = new Random();
 
@@ -76,9 +76,9 @@ public class IndevHellGen extends JavaPlugin {
 
     /**
      * Periodic spawn logic for Indev Hell worlds:
-     * - Passive mobs on grass/dirt regardless of light level.
-     * - Reasonable hostiles: zombies, skeletons, spiders, creepers, pigmen, Monster, rare ghasts.
-     * - Giants extremely rare, spider jockeys rare.
+     * - Passive mobs on dirt regardless of light level.
+     * - Occasional pig zombies, ghasts, MONSTER (id 49), giants, and wolves.
+     * - Rare spider jockeys.
      */
     private void performHellWorldSpawns() {
         Set<String> worldNamesCopy;
@@ -135,24 +135,21 @@ public class IndevHellGen extends JavaPlugin {
         int offsetX = spawnRandom.nextInt(SPAWN_RADIUS * 2 + 1) - SPAWN_RADIUS;
         int offsetZ = spawnRandom.nextInt(SPAWN_RADIUS * 2 + 1) - SPAWN_RADIUS;
 
+        int spawnX = playerLoc.getBlockX() + offsetX;
+        int spawnZ = playerLoc.getBlockZ() + offsetZ;
+
         // Do not spawn too close to the player
         if (Math.abs(offsetX) < MIN_SPAWN_DISTANCE && Math.abs(offsetZ) < MIN_SPAWN_DISTANCE) {
             return;
         }
 
-        int spawnX = playerLoc.getBlockX() + offsetX;
-        int spawnZ = playerLoc.getBlockZ() + offsetZ;
-
-        int surfaceY = findTopSolidY(world, spawnX, spawnZ);
-        if (surfaceY <= 2) {
+        int surfaceY = findTopDirtY(world, spawnX, spawnZ);
+        if (surfaceY <= 0) {
             return;
         }
 
         Block ground = world.getBlockAt(spawnX, surfaceY, spawnZ);
-        Material groundType = ground.getType();
-
-        // Only consider grass or dirt as spawn bases
-        if (groundType != Material.GRASS && groundType != Material.DIRT) {
+        if (ground.getType() != Material.DIRT) {
             return;
         }
 
@@ -167,7 +164,7 @@ public class IndevHellGen extends JavaPlugin {
 
         int roll = spawnRandom.nextInt(100);
 
-        if (roll < 70) {
+        if (roll < 65) {
             // Mostly passive animals
             CreatureType passiveType = pickPassiveCreature();
             world.spawnCreature(spawnLoc, passiveType);
@@ -175,40 +172,26 @@ public class IndevHellGen extends JavaPlugin {
         }
 
         // Hostile / Nether / special mobs
-        // Giants: extremely rare (about 0.2% of hostile attempts)
-        if (spawnRandom.nextInt(500) == 0) {
-            try {
-                world.spawnCreature(spawnLoc, CreatureType.GIANT);
-            } catch (Throwable t) {
-                // Ignore if GIANT not supported
-            }
-            return;
-        }
+        int specialRoll = spawnRandom.nextInt(100);
 
-        // Spider jockeys: rare (~1% of hostile attempts)
-        if (spawnRandom.nextInt(100) == 0) {
+        // 10% of hostile spawns = spider jockey
+        if (specialRoll < 10) {
             spawnSpiderJockey(world, spawnLoc);
             return;
         }
 
-        CreatureType hostileType = pickHellCreature(surfaceY);
-        if (hostileType == null) {
+        // 5% of hostile spawns = giant
+        if (specialRoll >= 10 && specialRoll < 15) {
+            try {
+                world.spawnCreature(spawnLoc, CreatureType.GIANT);
+            } catch (Throwable t) {
+                // Older Bukkit builds might not support GIANT; fail silently.
+            }
             return;
         }
 
-        // Make ghasts feel further away and higher up
-        if (hostileType == CreatureType.GHAST) {
-            // Require fairly high surface and large horizontal distance
-            if (surfaceY < 60) {
-                return;
-            }
-            if (Math.abs(offsetX) < 32 && Math.abs(offsetZ) < 32) {
-                return;
-            }
-
-            Location ghastLoc = new Location(world, spawnLoc.getX(), surfaceY + 10, spawnLoc.getZ());
-            world.spawnCreature(ghastLoc, hostileType);
-        } else {
+        CreatureType hostileType = pickHellCreature(surfaceY);
+        if (hostileType != null) {
             world.spawnCreature(spawnLoc, hostileType);
         }
     }
@@ -235,7 +218,7 @@ public class IndevHellGen extends JavaPlugin {
         } else if (r < 90) {
             return CreatureType.CHICKEN;
         } else {
-            // Slightly rarer wolves
+            // Slightly rarer wolves, but still "passive" in terms of environment spawning
             return CreatureType.WOLF;
         }
     }
@@ -243,23 +226,17 @@ public class IndevHellGen extends JavaPlugin {
     private CreatureType pickHellCreature(int surfaceY) {
         int r = spawnRandom.nextInt(100);
 
-        // Balance of overworld-style and Nether-style hostiles
-        if (r < 30) {
-            return CreatureType.ZOMBIE;
-        } else if (r < 55) {
-            return CreatureType.SKELETON;
-        } else if (r < 70) {
-            return CreatureType.SPIDER;
-        } else if (r < 80) {
-            return CreatureType.CREEPER;
-        } else if (r < 90) {
+        if (r < 40) {
             return CreatureType.PIG_ZOMBIE;
-        } else if (r < 95) {
-            // Your custom Monster; drops handled in your other plugin
+        } else if (r < 65) {
+            // Old generic Monster (id 49)
             return CreatureType.MONSTER;
+        } else if (r < 85) {
+            // Spider as a regular hostile spawn (non-jockey)
+            return CreatureType.SPIDER;
         } else {
-            // Rare ghasts; require some headroom
-            if (surfaceY > 50) {
+            // Ghasts prefer a bit of headroom; if we are too low, fall back
+            if (surfaceY > 48) {
                 return CreatureType.GHAST;
             } else {
                 return CreatureType.PIG_ZOMBIE;
@@ -267,36 +244,39 @@ public class IndevHellGen extends JavaPlugin {
         }
     }
 
-    private int findTopSolidY(World world, int x, int z) {
+    private int findTopDirtY(World world, int x, int z) {
         for (int y = 127; y > 0; y--) {
             Material type = world.getBlockAt(x, y, z).getType();
-            if (type != Material.AIR && type != Material.LEAVES) {
+            if (type == Material.DIRT) {
                 return y;
             }
+            if (type != Material.AIR && type != Material.LEAVES) {
+                // Hit something else solid before dirt
+                return -1;
+            }
         }
-        return 0;
+        return -1;
     }
 
     /**
      * Indev-style Hell chunk generator:
-     * - Bedrock at y=0
-     * - Thin lava floor (y=1–2)
-     * - Normal underground stone, caves, ores, dungeons
-     * - Lava at sea level (y=64) instead of water, between islands
-     * - Grass tops on islands, with dirt beneath
+     * - Nether dimension (set via Multiverse as ENV=NETHER)
+     * - Lava ocean at y < LAVA_LEVEL
+     * - Overworld-ish terrain above lava
+     * - Top layer is always dirt (no grass)
+     * - Extra vertical variation and simple cave carving
      */
     public static class IndevHellChunkGenerator extends ChunkGenerator {
 
         private static final int WORLD_HEIGHT = 128;
-        private static final int LAVA_FLOOR_TOP = 2;
-        private static final int SEA_LEVEL = 64;
+        private static final int LAVA_LEVEL   = 32;
+        private static final int BASE_HEIGHT  = 70; // slightly higher average to allow taller peaks
 
-        private final byte airId      = 0;
-        private final byte bedrockId  = (byte) Material.BEDROCK.getId();
-        private final byte stoneId    = (byte) Material.STONE.getId();
-        private final byte dirtId     = (byte) Material.DIRT.getId();
-        private final byte grassId    = (byte) Material.GRASS.getId();
-        private final byte lavaId     = (byte) Material.STATIONARY_LAVA.getId();
+        private final byte airId    = 0;
+        private final byte bedrockId = (byte) Material.BEDROCK.getId();
+        private final byte stoneId   = (byte) Material.STONE.getId();
+        private final byte dirtId    = (byte) Material.DIRT.getId();
+        private final byte lavaId    = (byte) Material.STATIONARY_LAVA.getId();
 
         @Override
         public byte[] generate(World world, Random random, int chunkX, int chunkZ) {
@@ -310,10 +290,10 @@ public class IndevHellGen extends JavaPlugin {
                     int worldZ = chunkZ * 16 + z;
 
                     double heightNoise = getHeightNoise(worldX, worldZ, seed);
-                    int terrainHeight = (int) (SEA_LEVEL + heightNoise);
+                    int terrainHeight = (int) (BASE_HEIGHT + heightNoise);
 
-                    if (terrainHeight < 40) {
-                        terrainHeight = 40;
+                    if (terrainHeight < LAVA_LEVEL + 4) {
+                        terrainHeight = LAVA_LEVEL + 4;
                     }
                     if (terrainHeight > WORLD_HEIGHT - 5) {
                         terrainHeight = WORLD_HEIGHT - 5;
@@ -322,46 +302,35 @@ public class IndevHellGen extends JavaPlugin {
                     // y = 0: bedrock
                     setBlock(blocks, x, 0, z, bedrockId);
 
-                    // y = 1..2: thin lava floor
-                    for (int y = 1; y <= LAVA_FLOOR_TOP; y++) {
+                    // y = 1 .. LAVA_LEVEL-1: lava ocean
+                    for (int y = 1; y < LAVA_LEVEL; y++) {
                         setBlock(blocks, x, y, z, lavaId);
                     }
 
-                    // y = 3..terrainHeight: stone mass
-                    for (int y = 3; y <= terrainHeight; y++) {
+                    // y = LAVA_LEVEL .. terrainHeight: initial solid stone mass
+                    for (int y = LAVA_LEVEL; y <= terrainHeight; y++) {
                         setBlock(blocks, x, y, z, stoneId);
                     }
 
-                    // Caves / crevices in the interior stone
-                    for (int y = 8; y <= terrainHeight - 4; y++) {
+                    // Simple cave / crevice carving: remove some interior stone
+                    for (int y = LAVA_LEVEL + 3; y <= terrainHeight - 2; y++) {
                         double caveNoise = getCaveNoise(worldX, y, worldZ, seed);
                         if (caveNoise > 1.9) {
+                            // Carve out cave
                             setBlock(blocks, x, y, z, airId);
                         }
                     }
 
-                    // Top skin: convert top few solid stone blocks into dirt/grass
+                    // Top skin: turn a few topmost stone blocks into dirt
                     int dirtPlaced = 0;
-                    for (int y = terrainHeight; y >= 3 && dirtPlaced < 4; y--) {
+                    for (int y = terrainHeight; y >= LAVA_LEVEL && dirtPlaced < 4; y--) {
                         byte current = getBlock(blocks, x, y, z);
                         if (current == stoneId) {
-                            if (dirtPlaced == 0) {
-                                // topmost block: grass
-                                setBlock(blocks, x, y, z, grassId);
-                            } else {
-                                setBlock(blocks, x, y, z, dirtId);
-                            }
+                            setBlock(blocks, x, y, z, dirtId);
                             dirtPlaced++;
                         } else if (current != airId) {
                             // Hit something else solid (lava, etc.) – stop
                             break;
-                        }
-                    }
-
-                    // Lava "ocean" at sea level: fill from terrainHeight+1 up to SEA_LEVEL
-                    if (terrainHeight < SEA_LEVEL) {
-                        for (int y = terrainHeight + 1; y <= SEA_LEVEL; y++) {
-                            setBlock(blocks, x, y, z, lavaId);
                         }
                     }
                 }
@@ -371,7 +340,7 @@ public class IndevHellGen extends JavaPlugin {
         }
 
         /**
-         * Terrain height noise: islands, lava seas, cliffs, hills.
+         * Height noise with more variation: plains, hills, and taller peaks.
          */
         private double getHeightNoise(int worldX, int worldZ, long seed) {
             double x = worldX / 40.0;
@@ -423,20 +392,19 @@ public class IndevHellGen extends JavaPlugin {
         @Override
         public List<BlockPopulator> getDefaultPopulators(World world) {
             List<BlockPopulator> list = new ArrayList<BlockPopulator>();
-            // Order: dungeons -> ores -> lava lakes -> trees -> surface decor -> houses
+            // Order: dungeons -> ores -> lava lakes -> trees -> surface decor
             list.add(new IndevHellDungeonPopulator());
             list.add(new IndevHellOrePopulator());
             list.add(new IndevHellLavaLakePopulator());
             list.add(new IndevHellTreePopulator());
             list.add(new IndevHellSurfacePopulator());
-            list.add(new IndevHellHousePopulator());
             return list;
         }
     }
 
     /**
      * Ore generation populator.
-     * Replaces stone with ore veins at roughly vanilla heights.
+     * Replaces stone with ore veins at roughly appropriate levels.
      */
     public static class IndevHellOrePopulator extends BlockPopulator {
 
@@ -519,6 +487,7 @@ public class IndevHellGen extends JavaPlugin {
     public static class IndevHellLavaLakePopulator extends BlockPopulator {
 
         private static final int WORLD_HEIGHT = 128;
+        private static final int LAVA_LEVEL   = 32;
 
         @Override
         public void populate(World world, Random random, Chunk chunk) {
@@ -534,13 +503,13 @@ public class IndevHellGen extends JavaPlugin {
             int centerZ = baseZ + 4 + random.nextInt(8);
 
             int surfaceY = findSurfaceY(world, centerX, centerZ);
-            if (surfaceY <= 5 || surfaceY >= WORLD_HEIGHT - 4) {
+            if (surfaceY <= LAVA_LEVEL + 3 || surfaceY >= WORLD_HEIGHT - 4) {
                 return;
             }
 
             int radius = 2 + random.nextInt(3); // 2–4 block radius
 
-            // Carve bowl and fill with lava
+            // Carve bowl
             for (int dx = -radius - 1; dx <= radius + 1; dx++) {
                 for (int dz = -radius - 1; dz <= radius + 1; dz++) {
                     double dist = Math.sqrt(dx * dx + dz * dz);
@@ -551,7 +520,7 @@ public class IndevHellGen extends JavaPlugin {
                         // Carve 2-deep depression
                         for (int dy = 0; dy <= 2; dy++) {
                             int y = surfaceY - dy;
-                            if (y <= 3) {
+                            if (y <= LAVA_LEVEL + 1) {
                                 continue;
                             }
                             Block block = world.getBlockAt(worldX, y, worldZ);
@@ -576,13 +545,13 @@ public class IndevHellGen extends JavaPlugin {
                     int worldX = centerX + dx;
                     int worldZ = centerZ + dz;
                     int y = findSurfaceY(world, worldX, worldZ);
-                    if (y <= 3 || y >= WORLD_HEIGHT - 1) {
+                    if (y <= LAVA_LEVEL + 1 || y >= WORLD_HEIGHT - 1) {
                         continue;
                     }
 
                     Block block = world.getBlockAt(worldX, y, worldZ);
                     Material type = block.getType();
-                    if (type == Material.STONE || type == Material.DIRT || type == Material.GRASS) {
+                    if (type == Material.STONE || type == Material.DIRT) {
                         if (random.nextBoolean()) {
                             block.setType(Material.SAND);
                         } else {
@@ -605,11 +574,12 @@ public class IndevHellGen extends JavaPlugin {
     }
 
     /**
-     * Tree populator: attempts to more closely resemble normal oak tree shapes.
+     * Simple overworld-style tree populator for the dirt islands.
      */
     public static class IndevHellTreePopulator extends BlockPopulator {
 
         private static final int WORLD_HEIGHT = 128;
+        private static final int LAVA_LEVEL   = 32;
 
         @Override
         public void populate(World world, Random random, Chunk chunk) {
@@ -623,16 +593,16 @@ public class IndevHellGen extends JavaPlugin {
                 int worldZ = chunk.getZ() * 16 + localZ;
 
                 int surfaceY = findSurfaceY(world, worldX, worldZ);
-                if (surfaceY <= 5 || surfaceY >= WORLD_HEIGHT - 10) {
+                if (surfaceY <= LAVA_LEVEL + 2 || surfaceY >= WORLD_HEIGHT - 8) {
                     continue;
                 }
 
                 Block ground = world.getBlockAt(worldX, surfaceY, worldZ);
-                if (ground.getType() != Material.GRASS && ground.getType() != Material.DIRT) {
+                if (ground.getType() != Material.DIRT) {
                     continue;
                 }
 
-                generateOakLikeTree(world, random, worldX, surfaceY + 1, worldZ);
+                generateSimpleTree(world, random, worldX, surfaceY + 1, worldZ);
             }
         }
 
@@ -646,11 +616,9 @@ public class IndevHellGen extends JavaPlugin {
             return 0;
         }
 
-        // Simple oak-like tree: straight trunk, 3-layer leaf canopy
-        private void generateOakLikeTree(World world, Random random, int x, int y, int z) {
-            int trunkHeight = 4 + random.nextInt(2); // 4–5 high trunk
+        private void generateSimpleTree(World world, Random random, int x, int y, int z) {
+            int trunkHeight = 4 + random.nextInt(3); // 4–6 high trunk
 
-            // Trunk
             for (int i = 0; i < trunkHeight; i++) {
                 Block block = world.getBlockAt(x, y + i, z);
                 Material type = block.getType();
@@ -661,27 +629,18 @@ public class IndevHellGen extends JavaPlugin {
 
             int topY = y + trunkHeight;
 
-            // Leaf layers:
-            // top layer: +1 above trunk, radius 1
-            // middle layer: at trunk top, radius 2
-            // lower layer: one below, radius 1-2
-            placeLeafLayer(world, x, topY + 1, z, 1);
-            placeLeafLayer(world, x, topY, z, 2);
-            placeLeafLayer(world, x, topY - 1, z, 1);
-        }
+            for (int dx = -2; dx <= 2; dx++) {
+                for (int dz = -2; dz <= 2; dz++) {
+                    for (int dy = -2; dy <= 2; dy++) {
+                        int dist = Math.abs(dx) + Math.abs(dy) + Math.abs(dz);
+                        if (dist > 3) {
+                            continue;
+                        }
 
-        private void placeLeafLayer(World world, int centerX, int y, int centerZ, int radius) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    int dist = Math.abs(dx) + Math.abs(dz);
-                    if (dist > radius + 1) {
-                        continue;
-                    }
-
-                    Block block = world.getBlockAt(centerX + dx, y, centerZ + dz);
-                    Material type = block.getType();
-                    if (type == Material.AIR) {
-                        block.setType(Material.LEAVES);
+                        Block block = world.getBlockAt(x + dx, topY + dy, z + dz);
+                        if (block.getType() == Material.AIR) {
+                            block.setType(Material.LEAVES);
+                        }
                     }
                 }
             }
@@ -690,35 +649,34 @@ public class IndevHellGen extends JavaPlugin {
 
     /**
      * Surface decoration:
-     * - Mushrooms and flowers on grass/dirt.
-     * - Sand and gravel near lava shorelines at sea level.
+     * - Mushrooms and flowers on dirt.
+     * - Sand and gravel near lava shorelines (the big lava sea).
      */
     public static class IndevHellSurfacePopulator extends BlockPopulator {
 
         private static final int WORLD_HEIGHT = 128;
-        private static final int SEA_LEVEL = 64;
+        private static final int LAVA_LEVEL   = 32;
 
         @Override
         public void populate(World world, Random random, Chunk chunk) {
             int baseX = chunk.getX() * 16;
             int baseZ = chunk.getZ() * 16;
 
-            // Decorate grass/dirt surfaces with mushrooms and flowers
+            // Decorate dirt surfaces with mushrooms and flowers
             int decorTries = 10 + random.nextInt(10); // 10–19 attempts
             for (int i = 0; i < decorTries; i++) {
                 int worldX = baseX + random.nextInt(16);
                 int worldZ = baseZ + random.nextInt(16);
 
                 int surfaceY = findSurfaceY(world, worldX, worldZ);
-                if (surfaceY <= 5 || surfaceY >= WORLD_HEIGHT - 2) {
+                if (surfaceY <= 0 || surfaceY >= WORLD_HEIGHT - 2) {
                     continue;
                 }
 
                 Block ground = world.getBlockAt(worldX, surfaceY, worldZ);
                 Block above = world.getBlockAt(worldX, surfaceY + 1, worldZ);
 
-                if ((ground.getType() != Material.GRASS && ground.getType() != Material.DIRT)
-                        || above.getType() != Material.AIR) {
+                if (ground.getType() != Material.DIRT || above.getType() != Material.AIR) {
                     continue;
                 }
 
@@ -741,20 +699,20 @@ public class IndevHellGen extends JavaPlugin {
                 }
             }
 
-            // Sand / gravel along the main lava ocean shoreline at sea level
-            int shoreTries = 24;
+            // Sand / gravel along the main lava ocean shoreline
+            int shoreTries = 20;
             for (int i = 0; i < shoreTries; i++) {
                 int worldX = baseX + random.nextInt(16);
                 int worldZ = baseZ + random.nextInt(16);
 
-                int y = SEA_LEVEL + random.nextInt(3) - 1; // around sea level
-                if (y <= 3 || y >= WORLD_HEIGHT) {
+                int y = LAVA_LEVEL + random.nextInt(6); // Just above lava level
+                if (y >= WORLD_HEIGHT) {
                     continue;
                 }
 
                 Block block = world.getBlockAt(worldX, y, worldZ);
                 Material type = block.getType();
-                if (type != Material.STONE && type != Material.DIRT && type != Material.GRASS) {
+                if (type != Material.STONE && type != Material.DIRT) {
                     continue;
                 }
 
@@ -936,117 +894,6 @@ public class IndevHellGen extends JavaPlugin {
 
                 inv.addItem(stack);
             }
-        }
-    }
-
-    /**
-     * Semi-rare Indev-style houses:
-     * - 7x7x7 cube, hollow, 2-block doorway.
-     * - Either all mossy cobble, or wood planks with stone floor.
-     */
-    public static class IndevHellHousePopulator extends BlockPopulator {
-
-        private static final int WORLD_HEIGHT = 128;
-
-        @Override
-        public void populate(World world, Random random, Chunk chunk) {
-            // Very roughly 1 house per 30 chunks
-            if (random.nextInt(30) != 0) {
-                return;
-            }
-
-            int baseX = chunk.getX() * 16;
-            int baseZ = chunk.getZ() * 16;
-
-            int centerX = baseX + 4 + random.nextInt(8);
-            int centerZ = baseZ + 4 + random.nextInt(8);
-
-            int surfaceY = findSurfaceY(world, centerX, centerZ);
-            if (surfaceY <= 5 || surfaceY >= WORLD_HEIGHT - 10) {
-                return;
-            }
-
-            // Check for reasonably flat area
-            if (!isAreaMostlySolid(world, centerX, surfaceY, centerZ, 3)) {
-                return;
-            }
-
-            boolean mossy = random.nextBoolean();
-            buildIndevHouse(world, random, centerX, surfaceY + 1, centerZ, mossy);
-        }
-
-        private int findSurfaceY(World world, int x, int z) {
-            for (int y = WORLD_HEIGHT - 1; y > 0; y--) {
-                Material type = world.getBlockAt(x, y, z).getType();
-                if (type != Material.AIR && type != Material.LEAVES) {
-                    return y;
-                }
-            }
-            return 0;
-        }
-
-        private boolean isAreaMostlySolid(World world, int centerX, int surfaceY, int centerZ, int radius) {
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    Block under = world.getBlockAt(centerX + dx, surfaceY, centerZ + dz);
-                    Material t = under.getType();
-                    if (t == Material.AIR || t == Material.STATIONARY_LAVA || t == Material.LAVA) {
-                        return false;
-                    }
-                }
-            }
-            return true;
-        }
-
-        private void buildIndevHouse(World world, Random random, int centerX, int baseY, int centerZ, boolean mossy) {
-            Material wallMat;
-            Material floorMat;
-
-            if (mossy) {
-                wallMat = Material.MOSSY_COBBLESTONE;
-                floorMat = Material.MOSSY_COBBLESTONE;
-            } else {
-                wallMat = Material.WOOD;
-                floorMat = Material.STONE;
-            }
-
-            // Build 7x7x7 cube: x,z = -3..3, y = 0..6 relative
-            for (int dx = -3; dx <= 3; dx++) {
-                for (int dz = -3; dz <= 3; dz++) {
-                    for (int dy = 0; dy <= 6; dy++) {
-                        int x = centerX + dx;
-                        int y = baseY + dy;
-                        int z = centerZ + dz;
-
-                        boolean isWall = (dx == -3 || dx == 3 || dz == -3 || dz == 3);
-                        boolean isFloor = (dy == 0);
-                        boolean isCeiling = (dy == 6);
-
-                        Block block = world.getBlockAt(x, y, z);
-
-                        if (isFloor) {
-                            block.setType(floorMat);
-                        } else if (isCeiling || isWall) {
-                            block.setType(wallMat);
-                        } else {
-                            block.setType(Material.AIR);
-                        }
-                    }
-                }
-            }
-
-            // 2-block tall doorway on one side (east wall)
-            for (int dy = 1; dy <= 2; dy++) {
-                Block doorBlock = world.getBlockAt(centerX + 3, baseY + dy, centerZ);
-                doorBlock.setType(Material.AIR);
-            }
-
-            // Torches inside: four at mid-height on walls
-            int torchY = baseY + 3;
-            world.getBlockAt(centerX - 2, torchY, centerZ).setType(Material.TORCH);
-            world.getBlockAt(centerX + 2, torchY, centerZ).setType(Material.TORCH);
-            world.getBlockAt(centerX, torchY, centerZ - 2).setType(Material.TORCH);
-            world.getBlockAt(centerX, torchY, centerZ + 2).setType(Material.TORCH);
         }
     }
 }

@@ -1,2 +1,2 @@
 # ChatGPT-Generated SourceMod Plugin Collection
- Collection of Sourcemod plugins I've asked ChatGPT to write
+ Collection of Sourcemod, AMXModX and Minecraft plugins I've asked ChatGPT to write

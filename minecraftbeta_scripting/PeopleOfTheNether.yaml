@@ -1,0 +1,5 @@
+name: PeopleOfTheNether
+main: PeopleOfTheNether
+version: 1.0
+author: ChatGPT
+description: Allows Monster (mob id 49) to spawn in the Nether and adds custom drops.

@@ -1,0 +1,8 @@
+name: SilkGold
+main: SilkGold
+version: 1.0
+author: ChatGPT
+commands:
+  silkgold:
+    description: Toggle SilkGold silk-touch behavior for gold tools.
+    usage: /silkgold

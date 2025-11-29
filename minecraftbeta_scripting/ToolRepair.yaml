@@ -1,0 +1,5 @@
+name: ToolRepair
+main: ToolRepair
+version: 1.0
+description: Allows repairing tools and armor by crafting two of the same item into a full-durability one.
+author: ChatGPT

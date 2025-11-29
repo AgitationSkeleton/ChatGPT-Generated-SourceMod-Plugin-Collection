@@ -1,0 +1,5 @@
+name: RareDrops
+main: RareDrops
+version: 1.2
+author: ChatGPT
+description: Backports modern-style rare mob drops to Beta 1.7.3 (bows, iron tools, chainmail armor, and gold gear/ingots).
