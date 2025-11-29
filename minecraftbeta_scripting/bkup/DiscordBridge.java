@@ -9,7 +9,7 @@ import java.net.Proxy;
 import java.net.URL;
 import java.net.URLEncoder;
 
-// JDA 5 builder no longer throws a checked LoginException, so we don't import it
+import javax.security.auth.login.LoginException;
 
 import org.bukkit.ChatColor;
 import org.bukkit.entity.Entity;
@@ -61,76 +61,50 @@ public class DiscordBridge extends JavaPlugin implements Listener {
 
     // Numeric ID of the channel the bot will read messages from (same channel as webhook is typical)
     private static final long RELAY_CHANNEL_ID = ALVINBLASTERL;
-	
-    // Name to use for server lifecycle messages
-    private static final String SERVER_NAME = "Server";	
 
     // ============================================================
 
     private JDA jda;
 
-    private boolean isDiscordConfigured() {
-        return BOT_TOKEN != null && !BOT_TOKEN.trim().isEmpty()
-                && WEBHOOK_URL != null && !WEBHOOK_URL.trim().isEmpty()
-                && RELAY_CHANNEL_ID != 0L;
-    }
-
-    @Override
-    public void onLoad() {
-        System.out.println("[DiscordBridge] Loading plugin...");
-        if (isDiscordConfigured()) {
-            sendToDiscordWebhookAsync(SERVER_NAME, "Server is starting...");
-        }
-    }
-
     @Override
     public void onEnable() {
         System.out.println("[DiscordBridge] Enabling...");
 
-        if (!isDiscordConfigured()) {
+        if (BOT_TOKEN == null || BOT_TOKEN.trim().isEmpty()
+                || WEBHOOK_URL == null || WEBHOOK_URL.trim().isEmpty()
+                || RELAY_CHANNEL_ID == 0L) {
+
             System.out.println("[DiscordBridge] BOT_TOKEN / WEBHOOK_URL / RELAY_CHANNEL_ID not set. Disabling plugin.");
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
         try {
-            // JDA 5: explicitly request the intents we need
-            jda = JDABuilder.createDefault(
-                            BOT_TOKEN,
-                            GatewayIntent.GUILD_MESSAGES,
-                            GatewayIntent.MESSAGE_CONTENT
-                    )
+            // JDA 4.x: enable GUILD_MESSAGES intent
+            jda = JDABuilder.createDefault(BOT_TOKEN)
+                    .enableIntents(GatewayIntent.GUILD_MESSAGES)
                     .addEventListeners(new DiscordListener())
                     .setAutoReconnect(true)
                     .build();
 
             System.out.println("[DiscordBridge] JDA started.");
+        } catch (LoginException e) {
+            System.out.println("[DiscordBridge] Failed to login to Discord: " + e.getMessage());
+            getServer().getPluginManager().disablePlugin(this);
+            return;
         } catch (Exception e) {
             System.out.println("[DiscordBridge] Failed to start JDA: " + e.getMessage());
-            e.printStackTrace(System.out);
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
         getServer().getPluginManager().registerEvents(this, this);
         System.out.println("[DiscordBridge] Enabled.");
-
-        sendToDiscordWebhookAsync(SERVER_NAME, "Server has started.");
     }
 
     @Override
     public void onDisable() {
         System.out.println("[DiscordBridge] Disabling...");
-
-        if (isDiscordConfigured()) {
-            try {
-                sendToDiscordWebhook(SERVER_NAME, "Server is stopping...");
-                sendToDiscordWebhook(SERVER_NAME, "Server has stopped.");
-            } catch (Exception e) {
-                System.out.println("[DiscordBridge] Failed to send shutdown messages: " + e.getMessage());
-            }
-        }
-
         if (jda != null) {
             try {
                 jda.shutdownNow();
@@ -200,6 +174,7 @@ public class DiscordBridge extends JavaPlugin implements Listener {
         Player player = (Player) dead;
         String playerName = player.getName();
 
+        // Use last damage cause to reconstruct a nicer death message.
         EntityDamageEvent lastDamage = player.getLastDamageCause();
         String deathMessage;
 
@@ -218,6 +193,7 @@ public class DiscordBridge extends JavaPlugin implements Listener {
         String playerName = player.getName();
         DamageCause cause = lastDamage.getCause();
 
+        // Entity attacks: players / mobs
         if (cause == DamageCause.ENTITY_ATTACK && lastDamage instanceof EntityDamageByEntityEvent) {
             EntityDamageByEntityEvent byEntity = (EntityDamageByEntityEvent) lastDamage;
             Entity damager = byEntity.getDamager();
@@ -233,48 +209,91 @@ public class DiscordBridge extends JavaPlugin implements Listener {
                 return playerName + " was slain by " + mobName;
             }
 
+            // Fallback generic melee
             return playerName + " was slain";
         }
 
+        // Environmental / non-entity causes
         switch (cause) {
             case VOID:
                 return playerName + " fell out of the world";
+
             case DROWNING:
                 return playerName + " drowned";
+
             case SUFFOCATION:
                 return playerName + " suffocated in a wall";
+
             case LAVA:
                 return playerName + " tried to swim in lava";
+
             case FIRE:
             case FIRE_TICK:
                 return playerName + " burned to death";
+
             case FALL:
                 return playerName + " hit the ground too hard";
+
             case CONTACT:
+                // Cactus etc.
                 return playerName + " was pricked to death";
+
             case BLOCK_EXPLOSION:
             case ENTITY_EXPLOSION:
                 return playerName + " exploded";
+
             case LIGHTNING:
                 return playerName + " was struck by lightning";
+
             case SUICIDE:
+                // /kill
                 return playerName + " committed suicide";
+
             default:
+                // Catch-all
                 return playerName + " died";
         }
     }
 
+    /**
+     * Determine a nice display name for a mob.
+     * Generic Monster becomes "Herobrine".
+     */
     private String getMobDisplayName(LivingEntity entity) {
-        if (entity instanceof Creeper) return "Creeper";
-        if (entity instanceof Skeleton) return "Skeleton";
-        if (entity instanceof Zombie) return "Zombie";
-        if (entity instanceof Spider) return "Spider";
-        if (entity instanceof Giant) return "Giant";
-        if (entity instanceof PigZombie) return "Zombie Pigman";
-        if (entity instanceof Wolf) return "Wolf";
-        if (entity instanceof Slime) return "Slime";
-        if (entity instanceof Ghast) return "Ghast";
-        if (entity instanceof Monster) return "Herobrine";
+        if (entity instanceof Creeper) {
+            return "Creeper";
+        }
+        if (entity instanceof Skeleton) {
+            return "Skeleton";
+        }
+        if (entity instanceof Zombie) {
+            return "Zombie";
+        }
+        if (entity instanceof Spider) {
+            return "Spider";
+        }
+        if (entity instanceof Giant) {
+            return "Giant";
+        }
+        if (entity instanceof PigZombie) {
+            return "Zombie Pigman";
+        }
+        if (entity instanceof Wolf) {
+            return "Wolf";
+        }
+        if (entity instanceof Slime) {
+            return "Slime";
+        }
+        if (entity instanceof Ghast) {
+            return "Ghast";
+        }
+
+        // Special-case generic Monster as "Herobrine"
+        if (entity instanceof Monster) {
+            return "Herobrine";
+        }
+
+        // Fallback: plain "Mob"
         return "Mob";
     }
 
@@ -283,10 +302,6 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     // ============================================================
 
     private void sendToDiscordWebhookAsync(final String playerName, final String text) {
-        if (!isDiscordConfigured()) {
-            return;
-        }
-
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -296,14 +311,11 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     }
 
     private void sendToDiscordWebhook(String playerName, String text) {
-        if (!isDiscordConfigured()) {
-            return;
-        }
-
         HttpURLConnection connection = null;
         try {
             URL url = new URL(WEBHOOK_URL);
 
+            // Explicitly avoid any system proxy that might be set
             Proxy proxy = Proxy.NO_PROXY;
             connection = (HttpURLConnection) url.openConnection(proxy);
 
@@ -373,28 +385,13 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     private class DiscordListener extends ListenerAdapter {
         @Override
         public void onMessageReceived(MessageReceivedEvent event) {
-            long channelId = 0L;
-            String channelName = "unknown";
-            try {
-                channelId = event.getChannel().getIdLong();
-                channelName = event.getChannel().getName();
-            } catch (Exception ignored) {
-            }
-
-            System.out.println("[DiscordBridge] MessageReceived: " +
-                    "channelId=" + channelId +
-                    " channelName=" + channelName +
-                    " author=" + event.getAuthor().getName() +
-                    " isBot=" + event.getAuthor().isBot() +
-                    " isWebhook=" + event.isWebhookMessage());
-
-            if (channelId != RELAY_CHANNEL_ID) {
-                System.out.println("[DiscordBridge] Ignoring message from non-relay channel " + channelId);
+            // Wrong channel → ignore
+            if (event.getChannel().getIdLong() != RELAY_CHANNEL_ID) {
                 return;
             }
 
+            // Ignore bots and webhooks (to avoid loops with our own webhook posts)
             if (event.getAuthor().isBot() || event.isWebhookMessage()) {
-                System.out.println("[DiscordBridge] Ignoring bot/webhook message.");
                 return;
             }
 
@@ -421,15 +418,16 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     }
 
     // ============================================================
-    // Skin / avatar API – Minotar isometric cube head
+    // Skin / avatar API
     // ============================================================
 
+    // Minotar face (works fine for offline/beta names)
     private String getAvatarUrl(String playerName) {
         try {
             String encodedName = URLEncoder.encode(playerName, "UTF-8");
-            return "https://minotar.net/cube/" + encodedName + "/64.png";
+            return "https://minotar.net/avatar/" + encodedName + "/64.png";
         } catch (Exception e) {
-            return "https://minotar.net/cube/Steve/64.png";
+            return "https://minotar.net/avatar/Steve/64.png";
         }
     }
 
