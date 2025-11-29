@@ -1,0 +1,6 @@
+name: InfdevEsqueGen
+main: InfdevEsqueGen
+version: 2.1
+author: ChatGPT
+description: "Infdev-style overworld terrain with tall hills, cliffs, caves, ores, dungeons, Indev houses, and rare brick pyramids."
+load: startup
