@@ -1,0 +1,29 @@
+name: MySkyblock
+main: MySkyblock
+version: 1.0
+author: ChatGPT
+load: startup
+description: Personal skyblock islands in a void world for each player.
+
+commands:
+  myskyblock:
+    description: Go to your personal skyblock (create it if needed).
+    usage: /<command>
+  myskyblocktpr:
+    description: Request teleport to another player's skyblock.
+    usage: /<command> <player>
+  myskyblocktpa:
+    description: Accept a MySkyblock teleport request.
+    usage: /<command>
+  myskyblocktpd:
+    description: Decline a MySkyblock teleport request.
+    usage: /<command>
+  myskyblockmain:
+    description: Return to the main non-skyblock world.
+    usage: /<command>
+  myskyblockreset:
+    description: Request a reset of your skyblock.
+    usage: /<command>
+  myskyblockconfirm:
+    description: Confirm a pending skyblock reset.
+    usage: /<command>
