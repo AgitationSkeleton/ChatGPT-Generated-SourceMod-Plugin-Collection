@@ -1,0 +1,10 @@
+name: HerobrineGhost
+main: HerobrineGhost
+version: 1.0.0
+author: ChatGPT
+description: Subtle Herobrine-style ghost sightings using a fake player.
+commands:
+  herobrineghost:
+    description: Control HerobrineGhost (reload config or spawn test ghost).
+    usage: /<command> [reload|test]
+    aliases: [hghost]
