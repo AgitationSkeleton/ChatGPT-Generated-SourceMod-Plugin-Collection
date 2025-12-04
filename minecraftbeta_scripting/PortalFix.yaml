@@ -1,0 +1,6 @@
+name: PortalFix
+main: PortalFix
+version: 1.0
+author: ChatGPT
+description: >
+  Workaround for multiverse nether-portal crashes: reroutes obsidian portals in non-default worlds to the primary world's nether with safe placement and portal creation.

@@ -1,43 +1,44 @@
-package com.example.discordbridge;
+// Author: ChatGPT
+// DiscordBridge - bridges Minecraft chat/events with Discord via JDA and webhooks
+//
+// NOTE: This version is written for Minecraft Beta 1.7.3 Bukkit/Poseidon,
+// without using org.bukkit.configuration.file.* APIs.
 
-import java.io.OutputStream;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
-import java.net.Proxy;
 import java.net.URL;
-import java.net.URLEncoder;
-
-// JDA 5 builder no longer throws a checked LoginException, so we don't import it
+import java.util.HashMap;
+import java.util.Map;
 
 import org.bukkit.ChatColor;
-import org.bukkit.entity.Entity;
-import org.bukkit.entity.Player;
-import org.bukkit.entity.LivingEntity;
-
 import org.bukkit.entity.Creeper;
-import org.bukkit.entity.Skeleton;
-import org.bukkit.entity.Zombie;
-import org.bukkit.entity.Spider;
-import org.bukkit.entity.Giant;
-import org.bukkit.entity.PigZombie;
-import org.bukkit.entity.Wolf;
-import org.bukkit.entity.Slime;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Ghast;
 import org.bukkit.entity.Monster;
+import org.bukkit.entity.PigZombie;
+import org.bukkit.entity.Player;
+import org.bukkit.entity.Skeleton;
+import org.bukkit.entity.Slime;
+import org.bukkit.entity.Spider;
+import org.bukkit.entity.Zombie;
 
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
+import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.player.PlayerChatEvent; // Beta 1.7.3
 import org.bukkit.event.player.PlayerCommandPreprocessEvent;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
-
-import org.bukkit.event.entity.EntityDeathEvent;
-import org.bukkit.event.entity.EntityDamageEvent;
-import org.bukkit.event.entity.EntityDamageEvent.DamageCause;
-import org.bukkit.event.entity.EntityDamageByEntityEvent;
 
 import org.bukkit.plugin.java.JavaPlugin;
 
@@ -50,369 +51,216 @@ import net.dv8tion.jda.api.requests.GatewayIntent;
 public class DiscordBridge extends JavaPlugin implements Listener {
 
     // ============================================================
-    // CONFIG – EDIT THESE AND RECOMPILE
+    // CONFIG – loaded from config.yml in the plugin folder
     // ============================================================
 
-    // Your Discord bot token (NOT a webhook)
-    private static final String BOT_TOKEN = "ALVINBLASTER";
+    private final Map<String, String> configValues = new HashMap<String, String>();
 
-    // Webhook URL for the channel where Minecraft events should appear
-    private static final String WEBHOOK_URL = "ALVINBLASTER";
+    private String botToken;
+    private String webhookUrl;
+    private long relayChannelId;
+    private String serverName;
 
-    // Numeric ID of the channel the bot will read messages from (same channel as webhook is typical)
-    private static final long RELAY_CHANNEL_ID = ALVINBLASTERL;
-	
-    // Name to use for server lifecycle messages
-    private static final String SERVER_NAME = "Server";	
+    private File configFile;
 
     // ============================================================
 
     private JDA jda;
 
-    private boolean isDiscordConfigured() {
-        return BOT_TOKEN != null && !BOT_TOKEN.trim().isEmpty()
-                && WEBHOOK_URL != null && !WEBHOOK_URL.trim().isEmpty()
-                && RELAY_CHANNEL_ID != 0L;
-    }
-
     @Override
     public void onLoad() {
-        System.out.println("[DiscordBridge] Loading plugin...");
+        System.out.println("[DiscordBridge] onLoad...");
+        initConfigFile();
+        loadConfigValues();
         if (isDiscordConfigured()) {
-            sendToDiscordWebhookAsync(SERVER_NAME, "Server is starting...");
+            sendToDiscordWebhookAsync(serverName, "Server is starting...");
         }
     }
 
     @Override
     public void onEnable() {
-        System.out.println("[DiscordBridge] Enabling...");
+        System.out.println("[DiscordBridge] Enabling DiscordBridge...");
+
+        initConfigFile();
+        loadConfigValues();
 
         if (!isDiscordConfigured()) {
-            System.out.println("[DiscordBridge] BOT_TOKEN / WEBHOOK_URL / RELAY_CHANNEL_ID not set. Disabling plugin.");
+            System.out.println("[DiscordBridge] bot-token, webhook-url, or relay-channel-id not set in config.yml. Disabling plugin.");
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
         try {
-            // JDA 5: explicitly request the intents we need
             jda = JDABuilder.createDefault(
-                            BOT_TOKEN,
-                            GatewayIntent.GUILD_MESSAGES,
-                            GatewayIntent.MESSAGE_CONTENT
+                        botToken,
+                        GatewayIntent.GUILD_MESSAGES,
+                        GatewayIntent.MESSAGE_CONTENT
                     )
-                    .addEventListeners(new DiscordListener())
-                    .setAutoReconnect(true)
+                    .addEventListeners(new DiscordMessageListener())
                     .build();
 
-            System.out.println("[DiscordBridge] JDA started.");
+            System.out.println("[DiscordBridge] JDA bot logged in.");
         } catch (Exception e) {
-            System.out.println("[DiscordBridge] Failed to start JDA: " + e.getMessage());
-            e.printStackTrace(System.out);
+            System.out.println("[DiscordBridge] Failed to log in bot:");
+            e.printStackTrace();
             getServer().getPluginManager().disablePlugin(this);
             return;
         }
 
         getServer().getPluginManager().registerEvents(this, this);
-        System.out.println("[DiscordBridge] Enabled.");
 
-        sendToDiscordWebhookAsync(SERVER_NAME, "Server has started.");
+        System.out.println("[DiscordBridge] Enabled.");
+        sendToDiscordWebhookAsync(serverName, "Server has started.");
     }
 
     @Override
     public void onDisable() {
-        System.out.println("[DiscordBridge] Disabling...");
-
-        if (isDiscordConfigured()) {
-            try {
-                sendToDiscordWebhook(SERVER_NAME, "Server is stopping...");
-                sendToDiscordWebhook(SERVER_NAME, "Server has stopped.");
-            } catch (Exception e) {
-                System.out.println("[DiscordBridge] Failed to send shutdown messages: " + e.getMessage());
-            }
-        }
-
+        System.out.println("[DiscordBridge] Disabling DiscordBridge...");
         if (jda != null) {
             try {
-                jda.shutdownNow();
-            } catch (Exception ignored) {
+                sendToDiscordWebhook(serverName, "Server is stopping...");
+                sendToDiscordWebhook(serverName, "Server has stopped.");
+            } catch (Exception e) {
+                e.printStackTrace();
             }
+            jda.shutdownNow();
         }
         System.out.println("[DiscordBridge] Disabled.");
     }
 
     // ============================================================
-    // Bukkit -> Discord relay (joins / quits / chat / commands)
+    // Simple config.yml handling (no Bukkit FileConfiguration)
     // ============================================================
 
-    @EventHandler
-    public void onPlayerJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-        String msg = player.getName() + " joined the game.";
-        sendToDiscordWebhookAsync(player.getName(), msg);
-    }
-
-    @EventHandler
-    public void onPlayerQuit(PlayerQuitEvent event) {
-        Player player = event.getPlayer();
-        String msg = player.getName() + " left the game.";
-        sendToDiscordWebhookAsync(player.getName(), msg);
-    }
-
-    @EventHandler
-    public void onPlayerChat(PlayerChatEvent event) {
-        Player player = event.getPlayer();
-        String msg = "<" + player.getName() + "> " + event.getMessage();
-        sendToDiscordWebhookAsync(player.getName(), msg);
-    }
-
-    @EventHandler
-    public void onPlayerCommand(PlayerCommandPreprocessEvent event) {
-        Player player = event.getPlayer();
-        String full = event.getMessage(); // e.g. "/login mypassword"
-        String lower = full.toLowerCase();
-
-        // xAuth-style sensitive commands – log only the command name, not args
-        if (lower.startsWith("/login") || lower.startsWith("/register")) {
-            String[] parts = lower.split(" ");
-            String cmdOnly = parts.length > 0 ? parts[0] : "/login";
-
-            String msg = player.getName() + " used " + cmdOnly + " (arguments hidden)";
-            sendToDiscordWebhookAsync(player.getName(), msg);
-            return;
+    private void initConfigFile() {
+        File folder = getDataFolder();
+        if (!folder.exists()) {
+            folder.mkdirs();
         }
-
-        // Normal commands: log full message
-        String formatted = player.getName() + " used command: " + full;
-        sendToDiscordWebhookAsync(player.getName(), formatted);
-    }
-
-    // ============================================================
-    // Death messages -> Discord (SimpleDeathMessages-style)
-    // ============================================================
-
-    @EventHandler
-    public void onEntityDeath(EntityDeathEvent event) {
-        Entity dead = event.getEntity();
-        if (!(dead instanceof Player)) {
-            return;
-        }
-
-        Player player = (Player) dead;
-        String playerName = player.getName();
-
-        EntityDamageEvent lastDamage = player.getLastDamageCause();
-        String deathMessage;
-
-        if (lastDamage != null) {
-            deathMessage = getDeathMessage(player, lastDamage);
-        } else {
-            deathMessage = playerName + " died";
-        }
-
-        if (deathMessage != null && deathMessage.length() > 0) {
-            sendToDiscordWebhookAsync(playerName, deathMessage);
+        configFile = new File(folder, "config.yml");
+        if (!configFile.exists()) {
+            writeDefaultConfig();
         }
     }
 
-    private String getDeathMessage(Player player, EntityDamageEvent lastDamage) {
-        String playerName = player.getName();
-        DamageCause cause = lastDamage.getCause();
-
-        if (cause == DamageCause.ENTITY_ATTACK && lastDamage instanceof EntityDamageByEntityEvent) {
-            EntityDamageByEntityEvent byEntity = (EntityDamageByEntityEvent) lastDamage;
-            Entity damager = byEntity.getDamager();
-
-            if (damager instanceof Player) {
-                Player killer = (Player) damager;
-                return playerName + " was slain by " + killer.getName();
-            }
-
-            if (damager instanceof LivingEntity) {
-                LivingEntity livingDamager = (LivingEntity) damager;
-                String mobName = getMobDisplayName(livingDamager);
-                return playerName + " was slain by " + mobName;
-            }
-
-            return playerName + " was slain";
-        }
-
-        switch (cause) {
-            case VOID:
-                return playerName + " fell out of the world";
-            case DROWNING:
-                return playerName + " drowned";
-            case SUFFOCATION:
-                return playerName + " suffocated in a wall";
-            case LAVA:
-                return playerName + " tried to swim in lava";
-            case FIRE:
-            case FIRE_TICK:
-                return playerName + " burned to death";
-            case FALL:
-                return playerName + " hit the ground too hard";
-            case CONTACT:
-                return playerName + " was pricked to death";
-            case BLOCK_EXPLOSION:
-            case ENTITY_EXPLOSION:
-                return playerName + " exploded";
-            case LIGHTNING:
-                return playerName + " was struck by lightning";
-            case SUICIDE:
-                return playerName + " committed suicide";
-            default:
-                return playerName + " died";
-        }
-    }
-
-    private String getMobDisplayName(LivingEntity entity) {
-        if (entity instanceof Creeper) return "Creeper";
-        if (entity instanceof Skeleton) return "Skeleton";
-        if (entity instanceof Zombie) return "Zombie";
-        if (entity instanceof Spider) return "Spider";
-        if (entity instanceof Giant) return "Giant";
-        if (entity instanceof PigZombie) return "Zombie Pigman";
-        if (entity instanceof Wolf) return "Wolf";
-        if (entity instanceof Slime) return "Slime";
-        if (entity instanceof Ghast) return "Ghast";
-        if (entity instanceof Monster) return "Herobrine";
-        return "Mob";
-    }
-
-    // ============================================================
-    // Async webhook sender
-    // ============================================================
-
-    private void sendToDiscordWebhookAsync(final String playerName, final String text) {
-        if (!isDiscordConfigured()) {
-            return;
-        }
-
-        new Thread(new Runnable() {
-            @Override
-            public void run() {
-                sendToDiscordWebhook(playerName, text);
-            }
-        }, "DiscordBridge-Webhook-" + playerName).start();
-    }
-
-    private void sendToDiscordWebhook(String playerName, String text) {
-        if (!isDiscordConfigured()) {
-            return;
-        }
-
-        HttpURLConnection connection = null;
+    private void writeDefaultConfig() {
+        System.out.println("[DiscordBridge] Creating default config.yml...");
+        BufferedWriter writer = null;
         try {
-            URL url = new URL(WEBHOOK_URL);
-
-            Proxy proxy = Proxy.NO_PROXY;
-            connection = (HttpURLConnection) url.openConnection(proxy);
-
-            connection.setRequestMethod("POST");
-            connection.setDoOutput(true);
-            connection.setUseCaches(false);
-
-            connection.setRequestProperty("Content-Type", "application/json");
-            connection.setRequestProperty("Accept", "*/*");
-            connection.setRequestProperty(
-                    "User-Agent",
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) DiscordBridge/1.0"
-            );
-
-            String avatarUrl = getAvatarUrl(playerName);
-
-            String payload = "{"
-                    + "\"username\":\"" + escapeJson(playerName) + "\","
-                    + "\"avatar_url\":\"" + escapeJson(avatarUrl) + "\","
-                    + "\"content\":\"" + escapeJson(text) + "\""
-                    + "}";
-
-            byte[] payloadBytes = payload.getBytes("UTF-8");
-            connection.setRequestProperty("Content-Length", String.valueOf(payloadBytes.length));
-
-            OutputStream outputStream = connection.getOutputStream();
-            outputStream.write(payloadBytes);
-            outputStream.flush();
-            outputStream.close();
-
-            int responseCode = connection.getResponseCode();
-            if (responseCode != 204 && responseCode != 200) {
-                System.out.println("[DiscordBridge] Webhook HTTP " + responseCode + " " + connection.getResponseMessage());
-
-                try {
-                    InputStream errorStream = connection.getErrorStream();
-                    if (errorStream != null) {
-                        BufferedReader reader = new BufferedReader(
-                                new InputStreamReader(errorStream, "UTF-8"));
-                        String line;
-                        StringBuilder body = new StringBuilder();
-                        while ((line = reader.readLine()) != null) {
-                            body.append(line);
-                        }
-                        reader.close();
-                        System.out.println("[DiscordBridge] Webhook error body: " + body.toString());
-                    }
-                } catch (Exception inner) {
-                    System.out.println("[DiscordBridge] Failed to read webhook error body: " + inner.getMessage());
-                }
-            }
-
+            writer = new BufferedWriter(new FileWriter(configFile));
+            writer.write("# DiscordBridge configuration\n");
+            writer.write("# bot-token: Your Discord bot token (NOT a webhook)\n");
+            writer.write("# webhook-url: Discord webhook URL for MC -> Discord events\n");
+            writer.write("# relay-channel-id: Numeric ID of the channel the bot should read from\n");
+            writer.write("# server-name: Name used in lifecycle messages\n");
+            writer.write("\n");
+            writer.write("bot-token: \"REPLACE_ME_BOT_TOKEN\"\n");
+            writer.write("webhook-url: \"https://discord.com/api/webhooks/ID/TOKEN\"\n");
+            writer.write("relay-channel-id: \"123456789012345678\"\n");
+            writer.write("server-name: \"Server\"\n");
         } catch (Exception e) {
-            System.out.println("[DiscordBridge] Failed to send webhook: " + e.getClass().getName() + ": " + e.getMessage());
-            e.printStackTrace(System.out);
+            System.out.println("[DiscordBridge] Failed to write default config.yml:");
+            e.printStackTrace();
         } finally {
-            if (connection != null) {
-                connection.disconnect();
+            try {
+                if (writer != null) writer.close();
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private void loadConfigValues() {
+        configValues.clear();
+
+        if (configFile == null) {
+            initConfigFile();
+        }
+
+        BufferedReader reader = null;
+        try {
+            reader = new BufferedReader(new FileReader(configFile));
+            String line;
+            while ((line = reader.readLine()) != null) {
+                line = line.trim();
+                if (line.length() == 0 || line.startsWith("#")) {
+                    continue;
+                }
+                int colonIndex = line.indexOf(':');
+                if (colonIndex == -1) {
+                    continue;
+                }
+                String key = line.substring(0, colonIndex).trim();
+                String value = line.substring(colonIndex + 1).trim();
+
+                // Strip surrounding quotes if present
+                if (value.startsWith("\"") && value.endsWith("\"") && value.length() >= 2) {
+                    value = value.substring(1, value.length() - 1);
+                }
+
+                configValues.put(key, value);
+            }
+        } catch (Exception e) {
+            System.out.println("[DiscordBridge] Failed to read config.yml:");
+            e.printStackTrace();
+        } finally {
+            try {
+                if (reader != null) reader.close();
+            } catch (Exception ignored) {}
+        }
+
+        this.botToken = safeGetString("bot-token");
+        this.webhookUrl = safeGetString("webhook-url");
+        this.serverName = safeGetString("server-name");
+        if (this.serverName.length() == 0) {
+            this.serverName = "Server";
+        }
+
+        this.relayChannelId = 0L;
+        String channelIdString = safeGetString("relay-channel-id");
+        if (channelIdString.length() > 0) {
+            try {
+                this.relayChannelId = Long.parseLong(channelIdString);
+            } catch (NumberFormatException ex) {
+                System.out.println("[DiscordBridge] Invalid relay-channel-id in config.yml; must be a numeric Discord channel ID.");
+                this.relayChannelId = 0L;
             }
         }
     }
 
+    private String safeGetString(String key) {
+        String value = configValues.get(key);
+        return value == null ? "" : value.trim();
+    }
+
+    private boolean isDiscordConfigured() {
+        return botToken != null && botToken.length() > 0
+                && webhookUrl != null && webhookUrl.length() > 0
+                && relayChannelId != 0L;
+    }
+
     // ============================================================
-    // Discord -> Bukkit relay
+    // DISCORD -> MINECRAFT
     // ============================================================
 
-    private class DiscordListener extends ListenerAdapter {
+    private class DiscordMessageListener extends ListenerAdapter {
         @Override
         public void onMessageReceived(MessageReceivedEvent event) {
-            long channelId = 0L;
-            String channelName = "unknown";
-            try {
-                channelId = event.getChannel().getIdLong();
-                channelName = event.getChannel().getName();
-            } catch (Exception ignored) {
-            }
-
-            System.out.println("[DiscordBridge] MessageReceived: " +
-                    "channelId=" + channelId +
-                    " channelName=" + channelName +
-                    " author=" + event.getAuthor().getName() +
-                    " isBot=" + event.getAuthor().isBot() +
-                    " isWebhook=" + event.isWebhookMessage());
-
-            if (channelId != RELAY_CHANNEL_ID) {
-                System.out.println("[DiscordBridge] Ignoring message from non-relay channel " + channelId);
+            if (event.getAuthor().isBot()) {
                 return;
             }
 
-            if (event.getAuthor().isBot() || event.isWebhookMessage()) {
-                System.out.println("[DiscordBridge] Ignoring bot/webhook message.");
+            long channelId = event.getChannel().getIdLong();
+            // Only relay from the configured channel, and do not log anything else
+            if (channelId != relayChannelId) {
                 return;
             }
+
+            System.out.println("[DiscordBridge] MessageReceivedEvent from configured channel.");
 
             final String authorName = event.getAuthor().getName();
             final String content = event.getMessage().getContentDisplay();
 
-            System.out.println("[DiscordBridge] Discord message in relay channel from "
-                    + authorName + ": " + content);
-
-            if (content == null || content.trim().isEmpty()) {
-                return;
-            }
-
-            final String mcMessage = ChatColor.DARK_AQUA + "[Discord] "
-                    + authorName + ": " + content;
-
+            final String mcMessage = ChatColor.BLUE + "[Discord] " + authorName + ": " + ChatColor.WHITE + content;
             getServer().getScheduler().scheduleSyncDelayedTask(DiscordBridge.this, new Runnable() {
-                @Override
                 public void run() {
                     getServer().broadcastMessage(mcMessage);
                 }
@@ -421,36 +269,93 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     }
 
     // ============================================================
-    // Skin / avatar API – Minotar isometric cube head
+    // MINECRAFT -> DISCORD (WEBHOOK)
     // ============================================================
 
-    private String getAvatarUrl(String playerName) {
+    private void sendToDiscordWebhookAsync(final String username, final String message) {
+        // Use a plain Java thread instead of Bukkit async scheduler (more compatible with old Bukkit)
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    sendToDiscordWebhook(username, message);
+                } catch (Exception e) {
+                    System.out.println("[DiscordBridge] Failed to send webhook message:");
+                    e.printStackTrace();
+                }
+            }
+        }).start();
+    }
+
+    private void sendToDiscordWebhook(String username, String message) throws Exception {
+        if (webhookUrl == null || webhookUrl.trim().length() == 0) {
+            System.out.println("[DiscordBridge] Webhook URL not configured; skipping send.");
+            return;
+        }
+
+        HttpURLConnection connection = null;
         try {
-            String encodedName = URLEncoder.encode(playerName, "UTF-8");
-            return "https://minotar.net/cube/" + encodedName + "/64.png";
-        } catch (Exception e) {
-            return "https://minotar.net/cube/Steve/64.png";
+            URL url = new URL(webhookUrl);
+            connection = (HttpURLConnection) url.openConnection();
+
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Content-Type", "application/json");
+
+            String payload = buildWebhookPayload(username, message);
+
+            OutputStream os = connection.getOutputStream();
+            os.write(payload.getBytes("UTF-8"));
+            os.flush();
+            os.close();
+
+            int responseCode = connection.getResponseCode();
+            if (responseCode >= 200 && responseCode < 300) {
+                System.out.println("[DiscordBridge] Webhook sent successfully. Response code: " + responseCode);
+            } else {
+                System.out.println("[DiscordBridge] Webhook failed. Response code: " + responseCode);
+                System.out.println("[DiscordBridge] Response message: " + connection.getResponseMessage());
+                InputStream errorStream = connection.getErrorStream();
+                if (errorStream != null) {
+                    BufferedReader br = new BufferedReader(new InputStreamReader(errorStream));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        System.out.println("[DiscordBridge] " + line);
+                    }
+                    br.close();
+                }
+            }
+        } finally {
+            if (connection != null) {
+                connection.disconnect();
+            }
         }
     }
 
-    // ============================================================
-    // Simple JSON escaping
-    // ============================================================
+    private String buildWebhookPayload(String username, String message) {
+        String safeUsername = escapeJson(username);
+        String safeMessage = escapeJson(message);
 
-    private String escapeJson(String input) {
-        if (input == null) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("{");
+        sb.append("\"username\":\"").append(safeUsername).append("\",");
+        sb.append("\"content\":\"").append(safeMessage).append("\"");
+        sb.append("}");
+        return sb.toString();
+    }
+
+    private String escapeJson(String text) {
+        if (text == null) {
             return "";
         }
-
-        StringBuilder builder = new StringBuilder(input.length() + 16);
-        for (int i = 0; i < input.length(); i++) {
-            char c = input.charAt(i);
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
             switch (c) {
-                case '"':
-                    builder.append("\\\"");
-                    break;
                 case '\\':
                     builder.append("\\\\");
+                    break;
+                case '"':
+                    builder.append("\\\"");
                     break;
                 case '\b':
                     builder.append("\\b");
@@ -468,7 +373,7 @@ public class DiscordBridge extends JavaPlugin implements Listener {
                     builder.append("\\t");
                     break;
                 default:
-                    if (c < 32) {
+                    if (c < 0x20 || c > 0x7E) {
                         String hex = Integer.toHexString(c);
                         builder.append("\\u");
                         for (int j = hex.length(); j < 4; j++) {
@@ -482,5 +387,130 @@ public class DiscordBridge extends JavaPlugin implements Listener {
             }
         }
         return builder.toString();
+    }
+
+    // ============================================================
+    // BUKKIT EVENTS (MINECRAFT SIDE)
+    // ============================================================
+
+    @EventHandler
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        String name = player.getName();
+        String msg = name + " joined the game.";
+        sendToDiscordWebhookAsync("Join/Quit", msg);
+    }
+
+    @EventHandler
+    public void onPlayerQuit(PlayerQuitEvent event) {
+        Player player = event.getPlayer();
+        String name = player.getName();
+        String msg = name + " left the game.";
+        sendToDiscordWebhookAsync("Join/Quit", msg);
+    }
+
+    @EventHandler
+    public void onPlayerChat(PlayerChatEvent event) {
+        Player player = event.getPlayer();
+        String name = player.getName();
+        String msg = event.getMessage();
+        String formatted = name + ": " + msg;
+        sendToDiscordWebhookAsync("Chat", formatted);
+    }
+
+    @EventHandler
+    public void onPlayerCommandPreprocess(PlayerCommandPreprocessEvent event) {
+        Player player = event.getPlayer();
+        String name = player.getName();
+        String message = event.getMessage();
+
+        if (message.startsWith("/")) {
+            sendToDiscordWebhookAsync("Commands", name + " used command: " + message);
+        }
+    }
+
+    @EventHandler
+    public void onEntityDeath(EntityDeathEvent event) {
+        Entity entity = event.getEntity();
+        EntityDamageEvent lastDamage = entity.getLastDamageCause();
+
+        if (!(entity instanceof Player)) {
+            return;
+        }
+        Player victim = (Player) entity;
+        String victimName = victim.getName();
+        String deathMessage;
+
+        if (lastDamage == null) {
+            deathMessage = victimName + " died.";
+        } else {
+            DamageCause cause = lastDamage.getCause();
+            if (cause == DamageCause.ENTITY_ATTACK && lastDamage instanceof EntityDamageByEntityEvent) {
+                EntityDamageByEntityEvent byEntity = (EntityDamageByEntityEvent) lastDamage;
+                Entity damager = byEntity.getDamager();
+
+                if (damager instanceof Player) {
+                    Player killer = (Player) damager;
+                    deathMessage = victimName + " was killed by " + killer.getName() + ".";
+                } else if (damager instanceof Creeper) {
+                    deathMessage = victimName + " was blown up by a Creeper.";
+                } else if (damager instanceof Skeleton) {
+                    deathMessage = victimName + " was shot by a Skeleton.";
+                } else if (damager instanceof Spider) {
+                    deathMessage = victimName + " was slain by a Spider.";
+                } else if (damager instanceof Zombie) {
+                    deathMessage = victimName + " was slain by a Zombie.";
+                } else if (damager instanceof PigZombie) {
+                    deathMessage = victimName + " was slain by a Zombie Pigman.";
+                } else if (damager instanceof Slime) {
+                    deathMessage = victimName + " was slain by a Slime.";
+                } else if (damager instanceof Ghast) {
+                    deathMessage = victimName + " was fireballed by a Ghast.";
+                } else if (damager instanceof Monster) {
+                    deathMessage = victimName + " was slain by a monster.";
+                } else {
+                    deathMessage = victimName + " was slain by an unknown entity.";
+                }
+            } else {
+                switch (cause) {
+                    case VOID:
+                        deathMessage = victimName + " fell into the void.";
+                        break;
+                    case FIRE_TICK:
+                        deathMessage = victimName + " burned to death.";
+                        break;
+                    case FIRE:
+                        deathMessage = victimName + " went up in flames.";
+                        break;
+                    case LAVA:
+                        deathMessage = victimName + " tried to swim in lava.";
+                        break;
+                    case FALL:
+                        deathMessage = victimName + " fell from a high place.";
+                        break;
+                    case SUFFOCATION:
+                        deathMessage = victimName + " suffocated in a wall.";
+                        break;
+                    case DROWNING:
+                        deathMessage = victimName + " drowned.";
+                        break;
+                    case BLOCK_EXPLOSION:
+                    case ENTITY_EXPLOSION:
+                        deathMessage = victimName + " blew up.";
+                        break;
+                    case CONTACT:
+                        deathMessage = victimName + " was pricked to death.";
+                        break;
+                    case LIGHTNING:
+                        deathMessage = victimName + " was struck by lightning.";
+                        break;
+                    default:
+                        deathMessage = victimName + " died.";
+                        break;
+                }
+            }
+        }
+
+        sendToDiscordWebhookAsync("Deaths", deathMessage);
     }
 }
