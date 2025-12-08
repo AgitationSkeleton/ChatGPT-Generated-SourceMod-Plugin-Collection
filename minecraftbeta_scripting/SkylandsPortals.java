@@ -557,32 +557,31 @@ public class SkylandsPortals extends JavaPlugin implements Listener {
     }
 
     private boolean hasNearbyPortal(Location center, int radius) {
-        World world = center.getWorld();
-        if (world == null) {
-            return false;
-        }
+    World world = center.getWorld();
+    if (world == null) {
+        return false;
+    }
 
-        int cx = center.getBlockX();
-        int cy = center.getBlockY();
-        int cz = center.getBlockZ();
+    int cx = center.getBlockX();
+    int cy = center.getBlockY();
+    int cz = center.getBlockZ();
 
-        int minY = Math.max(1, cy - radius);
-        int maxY = Math.min(127, cy + radius);
+    int minY = Math.max(1, cy - radius);
+    int maxY = Math.min(127, cy + radius);
 
-        for (int x = cx - radius; x <= cx + radius; x++) {
-            for (int y = minY; y <= maxY; y++) {
-                for (int z = cz - radius; z <= cz + radius; z++) {
-                    Block b = world.getBlockAt(x, y, z);
-                    if (b.getType() == PORTAL_MATERIAL) {
-                        if (isInGlowstonePortalFrame(b.getLocation())) {
-                            return true;
-                        }
-                    }
+    for (int x = cx - radius; x <= cx + radius; x++) {
+        for (int y = minY; y <= maxY; y++) {
+            for (int z = cz - radius; z <= cz + radius; z++) {
+                Block b = world.getBlockAt(x, y, z);
+                if (b.getType() == PORTAL_MATERIAL) {
+                    // Any portal nearby is good enough; don't recreate.
+                    return true;
                 }
             }
         }
-        return false;
     }
+    return false;
+}
 
     private void createArrivalPortalBehind(Location loc) {
         World world = loc.getWorld();
@@ -779,7 +778,12 @@ public class SkylandsPortals extends JavaPlugin implements Listener {
         for (int dx = 0; dx < 4; dx++) {
             for (int dy = 0; dy < 5; dy++) {
                 Block block = world.getBlockAt(baseX + dx, baseY + dy, baseZ);
+                boolean isCorner = (dx == 0 || dx == 3) && (dy == 0 || dy == 4);
                 boolean isFrameEdge = (dx == 0 || dx == 3 || dy == 0 || dy == 4);
+
+                if (isCorner) {
+                    continue;
+                }
 
                 if (isFrameEdge) {
                     if (block.getType() != Material.GLOWSTONE) {
@@ -803,7 +807,12 @@ public class SkylandsPortals extends JavaPlugin implements Listener {
         for (int dz = 0; dz < 4; dz++) {
             for (int dy = 0; dy < 5; dy++) {
                 Block block = world.getBlockAt(baseX, baseY + dy, baseZ + dz);
+                boolean isCorner = (dz == 0 || dz == 3) && (dy == 0 || dy == 4);
                 boolean isFrameEdge = (dz == 0 || dz == 3 || dy == 0 || dy == 4);
+
+                if (isCorner) {
+                    continue;
+                }
 
                 if (isFrameEdge) {
                     if (block.getType() != Material.GLOWSTONE) {

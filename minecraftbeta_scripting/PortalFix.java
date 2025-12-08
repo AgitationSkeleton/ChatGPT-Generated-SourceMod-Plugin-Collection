@@ -549,7 +549,12 @@ public class PortalFix extends JavaPlugin implements Listener {
         for (int dx = 0; dx < 4; dx++) {
             for (int dy = 0; dy < 5; dy++) {
                 Block block = world.getBlockAt(baseX + dx, baseY + dy, baseZ);
+                boolean isCorner = (dx == 0 || dx == 3) && (dy == 0 || dy == 4);
                 boolean isEdge = (dx == 0 || dx == 3 || dy == 0 || dy == 4);
+
+                if (isCorner) {
+                    continue;
+                }
 
                 if (isEdge) {
                     if (block.getType() != FRAME_MATERIAL) {
@@ -570,7 +575,12 @@ public class PortalFix extends JavaPlugin implements Listener {
         for (int dz = 0; dz < 4; dz++) {
             for (int dy = 0; dy < 5; dy++) {
                 Block block = world.getBlockAt(baseX, baseY + dy, baseZ + dz);
+                boolean isCorner = (dz == 0 || dz == 3) && (dy == 0 || dy == 4);
                 boolean isEdge = (dz == 0 || dz == 3 || dy == 0 || dy == 4);
+
+                if (isCorner) {
+                    continue;
+                }
 
                 if (isEdge) {
                     if (block.getType() != FRAME_MATERIAL) {
