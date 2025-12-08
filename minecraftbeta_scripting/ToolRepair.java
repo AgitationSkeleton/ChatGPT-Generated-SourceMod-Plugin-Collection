@@ -92,20 +92,32 @@ public class ToolRepair extends JavaPlugin {
             ItemStack result = new ItemStack(itemType, 1);
             result.setDurability((short) 0);
 
-            // Vertical recipe: two items stacked
-            // Shape is relative, so this works in any column.
+            // Vertical recipe: two items stacked (any column)
             ShapedRecipe vertical = new ShapedRecipe(result);
             vertical.shape("A", "A");
-            vertical.setIngredient('A', itemType);
+            vertical.setIngredient('A', itemType, 32767);
             getServer().addRecipe(vertical);
             count++;
 
-            // Horizontal recipe: two items side-by-side
-            // Shape is relative, so this works in any row.
+            // Horizontal recipe: two items side by side (any row)
             ShapedRecipe horizontal = new ShapedRecipe(result);
             horizontal.shape("AA");
-            horizontal.setIngredient('A', itemType);
+            horizontal.setIngredient('A', itemType, 32767);
             getServer().addRecipe(horizontal);
+            count++;
+
+            // Diagonal (top-left to bottom-right) in a 2x2 square
+            ShapedRecipe diagonalDown = new ShapedRecipe(result);
+            diagonalDown.shape("A ", " A");
+            diagonalDown.setIngredient('A', itemType, 32767);
+            getServer().addRecipe(diagonalDown);
+            count++;
+
+            // Diagonal (top-right to bottom-left) in a 2x2 square
+            ShapedRecipe diagonalUp = new ShapedRecipe(result);
+            diagonalUp.shape(" A", "A ");
+            diagonalUp.setIngredient('A', itemType, 32767);
+            getServer().addRecipe(diagonalUp);
             count++;
         }
 

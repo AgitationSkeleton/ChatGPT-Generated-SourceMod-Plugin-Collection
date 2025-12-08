@@ -1,13 +1,15 @@
+import java.io.File;
 import java.util.List;
 import java.util.Random;
 
 import org.bukkit.Material;
+import org.bukkit.entity.Arrow;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.PigZombie;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.Skeleton;
 import org.bukkit.entity.Zombie;
-import org.bukkit.entity.PigZombie;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
@@ -15,6 +17,7 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.util.config.Configuration;
 
 public class RareDrops extends JavaPlugin implements Listener {
 
@@ -23,15 +26,36 @@ public class RareDrops extends JavaPlugin implements Listener {
     // 2.5% rare drop chance, similar to modern Minecraft
     private static final double RARE_DROP_CHANCE = 0.025D;
 
+    // Config
+    private Configuration config;
+    private boolean requirePlayerKill = true;
+
     @Override
     public void onEnable() {
+        loadConfiguration();
         getServer().getPluginManager().registerEvents(this, this);
-        System.out.println("[RareDrops] Enabled. Backporting rare mob drops.");
+        System.out.println("[RareDrops] Enabled. Backporting rare mob drops. require-player-kill = " + requirePlayerKill);
     }
 
     @Override
     public void onDisable() {
         System.out.println("[RareDrops] Disabled.");
+    }
+
+    private void loadConfiguration() {
+        if (!getDataFolder().exists()) {
+            getDataFolder().mkdirs();
+        }
+
+        File configFile = new File(getDataFolder(), "config.yml");
+        config = new Configuration(configFile);
+        config.load();
+
+        // Read or set default
+        requirePlayerKill = config.getBoolean("require-player-kill", true);
+        config.setProperty("require-player-kill", requirePlayerKill);
+
+        config.save();
     }
 
     @EventHandler
@@ -44,19 +68,20 @@ public class RareDrops extends JavaPlugin implements Listener {
 
         LivingEntity deadEntity = (LivingEntity) entity;
 
-        // Old API: no getKiller(), so we check the last damage cause
-        if (!wasKilledByPlayer(deadEntity)) {
+        // If configured, only count kills directly caused by a player or their arrow
+        if (requirePlayerKill && !wasKilledByPlayer(deadEntity)) {
             return;
         }
 
         List<ItemStack> drops = event.getDrops();
 
+        // Order matters: PigZombie extends Zombie, so check PigZombie first.
         if (entity instanceof Skeleton) {
             handleSkeletonDrop(drops);
-        } else if (entity instanceof Zombie) {
-            handleZombieDrop(drops);
         } else if (entity instanceof PigZombie) {
             handlePigZombieDrop(drops);
+        } else if (entity instanceof Zombie) {
+            handleZombieDrop(drops);
         }
     }
 
@@ -69,7 +94,21 @@ public class RareDrops extends JavaPlugin implements Listener {
         EntityDamageByEntityEvent damageEvent = (EntityDamageByEntityEvent) lastDamage;
         Entity damager = damageEvent.getDamager();
 
-        return (damager instanceof Player);
+        // Direct melee hit by player
+        if (damager instanceof Player) {
+            return true;
+        }
+
+        // Arrow shot by player
+        if (damager instanceof Arrow) {
+            Arrow arrow = (Arrow) damager;
+            LivingEntity shooter = arrow.getShooter();
+            if (shooter instanceof Player) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void handleSkeletonDrop(List<ItemStack> drops) {
@@ -87,11 +126,11 @@ public class RareDrops extends JavaPlugin implements Listener {
             return;
         }
 
-        // Pool of modern-style rare drops using items that existed in Beta:
+        // Pool:
         // - Iron ingot
         // - Iron shovel
         // - Iron sword
-        // - Full set of chainmail armor pieces (so they're obtainable)
+        // - Chainmail armor pieces (helmet, chestplate, leggings, boots)
         int choice = random.nextInt(7); // 0..6
 
         ItemStack rareDrop;
