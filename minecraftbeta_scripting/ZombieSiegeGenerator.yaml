@@ -1,0 +1,7 @@
+name: ZombieSiegeGenerator
+main: ZombieSiegeGenerator
+version: 1.0.0
+author: ChatGPT
+load: STARTUP
+softdepend:
+  - Multiverse-Core
