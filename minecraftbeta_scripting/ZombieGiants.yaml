@@ -1,0 +1,5 @@
+name: ZombieGiants
+main: ZombieGiants
+version: 1.0
+author: ChatGPT
+description: Replaces a percentage of naturally-spawned zombies with Giants and gives them custom drops.

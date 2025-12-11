@@ -1,9 +1,9 @@
 name: ZombieSiegePlugin
 main: ZombieSiegePlugin
-version: 1.1.0
+version: 1.7.0
 author: ChatGPT
 commands:
   zombiesiege:
     description: Control the Zombie Siege mode
-    usage: /zombiesiege start|stop|status|startwave
+    usage: /zombiesiege start|stop|status|startwave|stats [player]
     aliases: [zs]
