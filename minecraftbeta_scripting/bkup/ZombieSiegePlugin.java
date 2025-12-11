@@ -32,7 +32,6 @@ import org.bukkit.entity.Giant;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.entity.Monster;
 import org.bukkit.entity.Player;
-import org.bukkit.entity.Slime;
 
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -54,12 +53,12 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
 
     private static final int TICKS_PER_SECOND = 20;
 
-    // Base inter-wave wait (in seconds) BEFORE we add 15s per wave number.
+    // Real-time timing (in TICKS_PER_SECOND units)
+    private static final int DEFAULT_PREP_MINUTES = 20;
     private static final int INTER_WAVE_SECONDS = 30;
+    private static final int INTER_WAVE_TICKS = INTER_WAVE_SECONDS * TICKS_PER_SECOND;
 
     // Settings (loaded from config.txt or defaults)
-    private static final int DEFAULT_PREP_MINUTES = 20;
-
     private int prepTicks;
     private boolean allowBlockBreaking;
     private boolean allowDoorBreaking;
@@ -526,7 +525,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         }
     }
 
-    // Unified “player is out of this siege” handling (death, quit, world change)
+    // Unified "player is out of this siege" handling (death, quit, world change)
     private void playerLeavesSiege(SiegeSession session, Player player, boolean died) {
         if (session == null || player == null) return;
         String name = player.getName();
@@ -1016,7 +1015,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
     private boolean isSiegeMob(Entity ent) {
         if (ent instanceof org.bukkit.entity.Zombie) return true;
         if (ent instanceof Giant) return true;
-        if (ent instanceof Slime) return true;
+        if (ent instanceof org.bukkit.entity.Slime) return true;
         if (ent instanceof org.bukkit.entity.Spider) return true;
         if (ent instanceof org.bukkit.entity.Skeleton) return true;
         if (ent instanceof org.bukkit.entity.Creeper) return true;
@@ -1032,7 +1031,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         if (ent instanceof org.bukkit.entity.Skeleton) return false;
         if (ent instanceof org.bukkit.entity.Creeper) return false;
         if (ent instanceof org.bukkit.entity.Spider) return false;
-        if (ent instanceof Slime) return false;
+        if (ent instanceof org.bukkit.entity.Slime) return false;
         if (ent instanceof org.bukkit.entity.PigZombie) return false;
         if (ent instanceof Giant) return false;
         if (ent instanceof org.bukkit.entity.Ghast) return false;
@@ -1217,11 +1216,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
                 if (!session.deathThisWave) {
                     session.wavesSurvived++;
                 }
-
-                // Extra setup time per wave: base 30s + 15s * wave number
-                int extraSeconds = 15 * session.currentWave;
-                int totalSeconds = INTER_WAVE_SECONDS + extraSeconds;
-                session.interWaveTicksRemaining = totalSeconds * TICKS_PER_SECOND;
+                session.interWaveTicksRemaining = INTER_WAVE_TICKS;
 
                 // Heal players between waves
                 healPlayers(session);
@@ -1229,9 +1224,9 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
                 broadcastToSession(session, "Wave " + session.currentWave +
                         " cleared. Waves survived: " + session.wavesSurvived + ".");
                 broadcastToSession(session, "Next wave will begin in about " +
-                        totalSeconds + " seconds.");
+                        INTER_WAVE_SECONDS + " seconds.");
                 debug(session, "Wave " + session.currentWave + " cleared, waiting " +
-                        totalSeconds + " seconds.");
+                        INTER_WAVE_SECONDS + " seconds.");
             }
         }
     }
@@ -1410,16 +1405,6 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
                 if (spawnLoc == null) continue;
 
                 LivingEntity mob = (LivingEntity) world.spawnCreature(spawnLoc, subType);
-
-                // Ensure slimes are LARGE, not tiny
-                if (subType == CreatureType.SLIME && mob instanceof Slime) {
-                    try {
-                        ((Slime) mob).setSize(3); // Large-ish
-                    } catch (Throwable t) {
-                        // If API differs, just ignore
-                    }
-                }
-
                 session.activeMobs.add(mob);
             }
         }
@@ -1711,41 +1696,29 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
             otherHalf = below;
         }
 
-        // Remove both halves of the door
         b.setType(Material.AIR);
         if (otherHalf != null) {
             otherHalf.setType(Material.AIR);
         }
 
-        // Block IDs in Beta 1.7.3:
-        // 64 = wooden door block; 71 = iron door block.
-        // Item IDs:
-        // 324 = wooden door item; 330 = iron door item.
-        int blockId = type.getId();
-        int itemId;
-        if (blockId == 71) {
-            itemId = 330; // iron door item
-        } else {
-            itemId = 324; // wooden door item
-        }
+        // Drop exactly one door item (324 or 330 equivalent)
+        Material itemType = doorItemFromBlock(type);
+        world.dropItemNaturally(b.getLocation().add(0.5, 0.5, 0.5), new ItemStack(itemType, 1));
+    }
 
-        world.dropItemNaturally(
-            b.getLocation().add(0.5, 0.5, 0.5),
-            new ItemStack(itemId, 1)
-        );
+    private Material doorItemFromBlock(Material blockMat) {
+        // Beta 1.7.3: wooden door item is 324, iron door item is 330.
+        // Bukkit usually exposes WOODEN_DOOR as item, IRON_DOOR as item, and IRON_DOOR_BLOCK as the block.
+        if (blockMat == Material.IRON_DOOR_BLOCK) {
+            return Material.IRON_DOOR;
+        }
+        // Everything else with "DOOR" we treat as wooden
+        return Material.WOODEN_DOOR;
     }
 
     private Material normalizeBrokenMaterial(Material mat) {
-        // Do NOT drop door blocks as items here; those are handled in breakDoorAndDrop().
-        int id = mat.getId();
-        if (id == 64 || id == 71) {
-            // Door block IDs – skip here so we don't drop the door block halves.
-            return null;
-        }
-
         // Convert grass to dirt so we don't get unobtainable grass without Silk Touch
         if (mat == Material.GRASS) return Material.DIRT;
-
         return mat;
     }
 
@@ -1798,11 +1771,6 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
     }
 
     private boolean isDoorMaterial(Material mat) {
-        if (mat == null) return false;
-
-        int id = mat.getId();
-        if (id == 64 || id == 71) return true; // wooden + iron door blocks in Beta 1.7.3
-
         String name = mat.name().toUpperCase();
         return (name.indexOf("DOOR") != -1);
     }
