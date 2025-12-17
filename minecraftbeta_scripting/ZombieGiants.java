@@ -6,13 +6,14 @@ import java.util.Set;
 import java.util.ArrayList;
 import java.util.logging.Logger;
 
-import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.World;
+import org.bukkit.Location;
 import org.bukkit.entity.CreatureType;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Giant;
 import org.bukkit.entity.Zombie;
+import org.bukkit.entity.Chicken;
 import org.bukkit.event.Event.Priority;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
@@ -30,25 +31,29 @@ public class ZombieGiants extends JavaPlugin implements Listener {
     private final Random random = new Random();
     private final Set<String> blockedWorlds = new HashSet<String>();
 
-    private int spawnRateDenominator; // 1 in N chance
+    // Giant conversion: 1 in N chance
+    private int spawnRateDenominator;
+
+    // Giant drops
     private Material dropMaterial;
     private int dropAmount;
+
+    // Chicken jockey conversion
+    private boolean chickenJockeyEnabled;
+    private double chickenJockeyChancePercent; // e.g. 4.75 means 4.75%
 
     private Configuration config;
 
     @Override
     public void onEnable() {
-        // Prepare config
         setupConfig();
-
-        // Load values from config
         reloadSettings();
 
-        // Register events
         PluginManager pm = getServer().getPluginManager();
         pm.registerEvents(this, this);
 
-        log.info("[ZombieGiants] Enabled. 1 in " + spawnRateDenominator + " zombies may become Giants.");
+        log.info("[ZombieGiants] Enabled. GiantChance=1/" + spawnRateDenominator +
+                ", ChickenJockey=" + (chickenJockeyEnabled ? (chickenJockeyChancePercent + "%") : "disabled"));
     }
 
     @Override
@@ -57,7 +62,6 @@ public class ZombieGiants extends JavaPlugin implements Listener {
     }
 
     private void setupConfig() {
-        // Ensure plugin data folder exists
         if (!getDataFolder().exists()) {
             getDataFolder().mkdirs();
         }
@@ -66,15 +70,14 @@ public class ZombieGiants extends JavaPlugin implements Listener {
         config = new Configuration(configFile);
         config.load();
 
-        // Set defaults if not present
+        // Defaults (only set if missing)
         if (config.getProperty("SpawnRate") == null) {
-            config.setProperty("SpawnRate", 100); // 1/100 chance
+            config.setProperty("SpawnRate", 100); // 1/100
         }
 
         if (config.getProperty("Drops.Material") == null) {
             config.setProperty("Drops.Material", "SPONGE");
         }
-
         if (config.getProperty("Drops.Amount") == null) {
             config.setProperty("Drops.Amount", 16);
         }
@@ -87,11 +90,19 @@ public class ZombieGiants extends JavaPlugin implements Listener {
             config.setProperty("BlockedWorlds", defaults);
         }
 
+        // Chicken jockey settings
+        if (config.getProperty("ChickenJockey.Enabled") == null) {
+            config.setProperty("ChickenJockey.Enabled", true);
+        }
+        if (config.getProperty("ChickenJockey.ChancePercent") == null) {
+            config.setProperty("ChickenJockey.ChancePercent", 4.75);
+        }
+
         config.save();
     }
 
     private void reloadSettings() {
-        // Spawn rate: 1 in N zombies become Giants
+        // Giant chance: 1 in N
         spawnRateDenominator = config.getInt("SpawnRate", 100);
         if (spawnRateDenominator < 1) {
             spawnRateDenominator = 1;
@@ -105,18 +116,17 @@ public class ZombieGiants extends JavaPlugin implements Listener {
             amount = 1;
         }
 
-        Material mat = Material.SPONGE; // default
+        Material mat = Material.SPONGE;
         try {
             mat = Material.valueOf(materialName.toUpperCase());
         } catch (IllegalArgumentException ex) {
-            log.warning("[ZombieGiants] Invalid Drops.Material in config.yml: '" + materialName +
-                        "', defaulting to SPONGE.");
+            log.warning("[ZombieGiants] Invalid Drops.Material: '" + materialName + "', defaulting to SPONGE.");
         }
 
-        this.dropMaterial = mat;
-        this.dropAmount = amount;
+        dropMaterial = mat;
+        dropAmount = amount;
 
-        // Blocked worlds (store in lowercase for case-insensitive compare)
+        // Blocked worlds
         blockedWorlds.clear();
         List<String> worldsList = config.getStringList("BlockedWorlds", null);
         if (worldsList != null) {
@@ -130,9 +140,16 @@ public class ZombieGiants extends JavaPlugin implements Listener {
             }
         }
 
-        log.info("[ZombieGiants] Config reloaded: SpawnRate=1/" + spawnRateDenominator +
-                 ", Drops=" + dropAmount + "x " + dropMaterial.name() +
-                 ", BlockedWorlds=" + blockedWorlds);
+        // Chicken jockey config (old Configuration can store numbers as Integer/Double/etc)
+        chickenJockeyEnabled = getBooleanCompat("ChickenJockey.Enabled", true);
+        chickenJockeyChancePercent = getDoubleCompat("ChickenJockey.ChancePercent", 4.75);
+        if (chickenJockeyChancePercent < 0.0) chickenJockeyChancePercent = 0.0;
+        if (chickenJockeyChancePercent > 100.0) chickenJockeyChancePercent = 100.0;
+
+        log.info("[ZombieGiants] Config: SpawnRate=1/" + spawnRateDenominator +
+                ", Drops=" + dropAmount + "x " + dropMaterial.name() +
+                ", ChickenJockey=" + (chickenJockeyEnabled ? (chickenJockeyChancePercent + "%") : "disabled") +
+                ", BlockedWorlds=" + blockedWorlds);
     }
 
     @EventHandler(priority = Priority.Normal, ignoreCancelled = true)
@@ -143,7 +160,7 @@ public class ZombieGiants extends JavaPlugin implements Listener {
             return;
         }
 
-        // Only affect natural spawns (not spawners, eggs, plugins, etc.)
+        // Only natural spawns
         if (event.getSpawnReason() != CreatureSpawnEvent.SpawnReason.NATURAL) {
             return;
         }
@@ -153,15 +170,39 @@ public class ZombieGiants extends JavaPlugin implements Listener {
             return;
         }
 
-        // Roll the dice: 1 in spawnRateDenominator chance
-        if (random.nextInt(spawnRateDenominator) != 0) {
+        Location spawnLoc = entity.getLocation();
+
+        // 1) Giant conversion (takes precedence)
+        if (random.nextInt(spawnRateDenominator) == 0) {
+            // Require enough space for a giant, otherwise leave zombie alone
+            if (!hasGiantSpace(world, spawnLoc.getBlockX(), spawnLoc.getBlockY(), spawnLoc.getBlockZ())) {
+                return;
+            }
+
+            event.setCancelled(true);
+            world.spawnCreature(spawnLoc, CreatureType.GIANT);
             return;
         }
 
-        // Turn this zombie into a Giant: cancel original spawn and spawn a Giant
-        event.setCancelled(true);
+        // 2) Chicken jockey conversion (only if not turned into giant)
+        if (chickenJockeyEnabled && rollPercent(chickenJockeyChancePercent)) {
+            // Chicken jockey doesn't need huge clearance; basic 2-block vertical + 1x1 is fine.
+            // If it's cramped, just leave zombie alone.
+            if (!hasSmallMobSpace(world, spawnLoc.getBlockX(), spawnLoc.getBlockY(), spawnLoc.getBlockZ())) {
+                return;
+            }
 
-        world.spawnCreature(entity.getLocation(), CreatureType.GIANT);
+            event.setCancelled(true);
+
+            // Spawn chicken, then zombie, then mount zombie on chicken
+            Entity chickenEnt = world.spawnCreature(spawnLoc, CreatureType.CHICKEN);
+            Entity zombieEnt = world.spawnCreature(spawnLoc, CreatureType.ZOMBIE);
+
+            if (chickenEnt instanceof Chicken) {
+                // In old Bukkit, setPassenger exists on Entity
+                chickenEnt.setPassenger(zombieEnt);
+            }
+        }
     }
 
     @EventHandler(priority = Priority.Normal, ignoreCancelled = true)
@@ -174,11 +215,9 @@ public class ZombieGiants extends JavaPlugin implements Listener {
 
         World world = entity.getWorld();
         if (isWorldBlocked(world)) {
-            // In blocked worlds, leave drops alone
             return;
         }
 
-        // Override drops to configured item
         List<ItemStack> drops = event.getDrops();
         drops.clear();
 
@@ -188,13 +227,61 @@ public class ZombieGiants extends JavaPlugin implements Listener {
     }
 
     private boolean isWorldBlocked(World world) {
-        if (world == null) {
-            return false;
-        }
+        if (world == null) return false;
         String name = world.getName();
-        if (name == null) {
-            return false;
-        }
+        if (name == null) return false;
         return blockedWorlds.contains(name.toLowerCase());
+    }
+
+    private boolean rollPercent(double chancePercent) {
+        // random [0.0, 100.0)
+        double roll = random.nextDouble() * 100.0;
+        return roll < chancePercent;
+    }
+
+    private boolean hasSmallMobSpace(World world, int baseX, int baseY, int baseZ) {
+        // Require two air blocks (feet + head space) at the exact column
+        // (typeId 0 = air)
+        if (world.getBlockTypeIdAt(baseX, baseY, baseZ) != 0) return false;
+        if (world.getBlockTypeIdAt(baseX, baseY + 1, baseZ) != 0) return false;
+        return true;
+    }
+
+    private boolean hasGiantSpace(World world, int baseX, int baseY, int baseZ) {
+        // Require 12 blocks of vertical clearance and a 3x3 footprint
+        int requiredHeight = 12;
+
+        for (int yOffset = 0; yOffset < requiredHeight; yOffset++) {
+            int y = baseY + yOffset;
+
+            for (int xOffset = -1; xOffset <= 1; xOffset++) {
+                for (int zOffset = -1; zOffset <= 1; zOffset++) {
+                    int typeId = world.getBlockTypeIdAt(baseX + xOffset, y, baseZ + zOffset);
+                    if (typeId != 0) {
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private boolean getBooleanCompat(String path, boolean defaultValue) {
+        Object value = config.getProperty(path);
+        if (value == null) return defaultValue;
+        if (value instanceof Boolean) return ((Boolean) value).booleanValue();
+        return Boolean.valueOf(String.valueOf(value)).booleanValue();
+    }
+
+    private double getDoubleCompat(String path, double defaultValue) {
+        Object value = config.getProperty(path);
+        if (value == null) return defaultValue;
+        if (value instanceof Number) return ((Number) value).doubleValue();
+        try {
+            return Double.parseDouble(String.valueOf(value));
+        } catch (NumberFormatException ex) {
+            return defaultValue;
+        }
     }
 }

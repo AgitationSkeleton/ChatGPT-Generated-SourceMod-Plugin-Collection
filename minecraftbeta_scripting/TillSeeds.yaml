@@ -1,0 +1,5 @@
+name: TillSeeds
+main: TillSeeds
+version: 1.0.0
+author: ChatGPT
+description: Allows shears to collect cobweb/tallgrass/deadbush, adds classic hoe-seed drops, and can prevent tall grass in new chunks.

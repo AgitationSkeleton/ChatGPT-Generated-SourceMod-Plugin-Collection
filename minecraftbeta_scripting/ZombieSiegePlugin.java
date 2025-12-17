@@ -86,7 +86,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
     // Approximate block-breaking hardness (seconds)
     private Map<Material, Integer> hardnessSeconds = new HashMap<Material, Integer>();
 
-    // Global “seconds” counter (increments once per scheduler run)
+    // Approximate "seconds" counter we maintain ourselves
     private int globalSeconds = 0;
 
     // Per-player best survival (in seconds)
@@ -95,7 +95,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
     // Per-player total siege mob kills (across all sieges)
     private Map<String, Integer> totalKills = new HashMap<String, Integer>();
 
-    // Killstreak tracking (global “3 enemies in <= 3 seconds”)
+    // Killstreak tracking (3 enemies in <= 3 seconds)
     private Map<String, Integer> lastKillSecond = new HashMap<String, Integer>();
     private Map<String, Integer> killStreakCount = new HashMap<String, Integer>();
 
@@ -497,6 +497,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         session.activeMobs.clear();
         session.breakTasks.clear();
         session.belowPlayerSinceSecond.clear();
+        session.slimeStuckSinceSecond = -1;
 
         sessions.remove(session.world.getName());
     }
@@ -696,6 +697,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         session.lastSurvivalBroadcastMinutes = 0;
         session.sessionKills.clear();
         session.belowPlayerSinceSecond.clear();
+        session.slimeStuckSinceSecond = -1;
 
         broadcastToSession(session, player.getName() + " has started a Zombie Siege in this world.");
         int minutes = prepTicks / (60 * TICKS_PER_SECOND);
@@ -1161,6 +1163,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
             session.awaitingNextWave = false;
             session.currentWave = 0;
             session.interWaveTicksRemaining = 0;
+            session.slimeStuckSinceSecond = -1;
             return;
         }
 
@@ -1209,6 +1212,9 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
 
             // Survival milestone messages every 5 minutes
             handleSurvivalMilestones(session);
+
+            // Auto-clean up if only slimes remain for 30+ seconds
+            handleSlimeStuckTimeout(session);
 
             if (session.activeMobs.isEmpty()) {
                 // Wave cleared
@@ -1261,6 +1267,66 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         }
     }
 
+    private void handleSlimeStuckTimeout(SiegeSession session) {
+        if (!session.siegeActive) return;
+
+        int size = session.activeMobs.size();
+        if (size == 0) {
+            // No mobs, nothing to do – also clear any previous tracking.
+            session.slimeStuckSinceSecond = -1;
+            return;
+        }
+
+        // We only care about the case “1 or 2 mobs left”
+        if (size > 2) {
+            session.slimeStuckSinceSecond = -1;
+            return;
+        }
+
+        boolean allSlimes = true;
+        for (int i = 0; i < session.activeMobs.size(); i++) {
+            LivingEntity le = session.activeMobs.get(i);
+            if (le == null || le.isDead()) {
+                // Will be cleaned up in cleanMobList(), ignore here.
+                continue;
+            }
+            if (!(le instanceof Slime)) {
+                allSlimes = false;
+                break;
+            }
+        }
+
+        if (!allSlimes) {
+            // If the last few mobs are NOT all slimes, don't use this shortcut.
+            session.slimeStuckSinceSecond = -1;
+            return;
+        }
+
+        // From here: 1–2 remaining, and the living ones are slimes.
+        if (session.slimeStuckSinceSecond < 0) {
+            // Start the 30s timer
+            session.slimeStuckSinceSecond = globalSeconds;
+            return;
+        }
+
+        int elapsed = globalSeconds - session.slimeStuckSinceSecond;
+        if (elapsed < 30) {
+            return;
+        }
+
+        // 30+ seconds with only slimes left – treat as “effectively cleared”
+        debug(session, "Only slimes remain for 30s; removing them and ending the wave.");
+
+        for (int i = 0; i < session.activeMobs.size(); i++) {
+            LivingEntity le = session.activeMobs.get(i);
+            if (le != null && !le.isDead()) {
+                le.remove();  // no extra drops/kills; just clear the stuck slimes
+            }
+        }
+        session.activeMobs.clear();
+        session.slimeStuckSinceSecond = -1;
+    }
+
     private boolean hasOnlineSiegePlayersInWorld(SiegeSession session) {
         for (String name : session.playersInSiege) {
             Player p = Bukkit.getPlayer(name);
@@ -1309,6 +1375,7 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
         session.awaitingNextWave = false;
         session.deathThisWave = false;
         session.currentWave++;
+        session.slimeStuckSinceSecond = -1;
         if (session.siegeStartSecond < 0) {
             session.siegeStartSecond = globalSeconds;
             session.lastSurvivalBroadcastMinutes = 0;
@@ -1843,6 +1910,9 @@ public class ZombieSiegePlugin extends JavaPlugin implements Listener, CommandEx
 
         // Anti-tunneling: mob ID -> second when it was first noticed below player
         Map<Integer, Integer> belowPlayerSinceSecond = new HashMap<Integer, Integer>();
+
+        // Time when we first noticed “only slimes remain”
+        int slimeStuckSinceSecond = -1;
 
         SiegeSession(World world) {
             this.world = world;

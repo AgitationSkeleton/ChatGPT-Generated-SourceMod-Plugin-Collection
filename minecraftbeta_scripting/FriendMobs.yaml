@@ -1,0 +1,17 @@
+name: FriendMobs
+main: FriendMobs
+version: 1.0
+author: ChatGPT
+commands:
+  summonfriend:
+    description: Summon a friendly mob allied to you.
+    usage: /summonfriend <mobname>
+  friendlist:
+    description: List your active friend mobs and their IDs.
+    usage: /friendlist
+  dismissfriend:
+    description: Remove one friend mob by id, or all of them.
+    usage: /dismissfriend <id|all>
+  summon:
+    description: Summon a normal mob a few blocks in front of you (not a friend).
+    usage: /summon <mobname>

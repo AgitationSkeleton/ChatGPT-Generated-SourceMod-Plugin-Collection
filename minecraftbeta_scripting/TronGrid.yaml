@@ -1,0 +1,8 @@
+name: TronGrid
+main: tron.TronGrid
+version: 3.0.0
+author: ChatGPT
+load: STARTUP
+softdepend:
+  - Multiverse-Core
+description: "TRON Legacy-inspired canyon-city Grid world generator for Minecraft Beta 1.7.3 (Poseidon/Bukkit). Use with Multiverse -g TronGrid"
