@@ -1,0 +1,6 @@
+name: PlayerHeadDrop
+main: com.redchanit.playerheaddrop.PlayerHeadDrop
+version: 1.0
+api-version: 1.21
+description: Drops a player's head (with their skin) when they die.
+author: ChatGPT

@@ -1,0 +1,16 @@
+name: SnowGolemTweaks
+main: com.redchanit.snowgolemtweaks.SnowGolemTweaks
+version: 1.0
+api-version: 1.21
+description: Configurable Snow Golem protections and snowball/snow-trail tweaks.
+author: ChatGPT
+
+commands:
+  sgt:
+    description: Reload SnowGolemTweaks config.
+    usage: /<command> reload
+
+permissions:
+  snowgolemtweaks.reload:
+    description: Allows reloading the SnowGolemTweaks config.
+    default: op

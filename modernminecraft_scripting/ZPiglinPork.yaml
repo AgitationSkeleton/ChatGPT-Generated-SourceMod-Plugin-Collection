@@ -1,0 +1,14 @@
+name: ZPiglinPork
+main: com.redchanit.zpiglinpork.ZPiglinPork
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Replaces (or additionally adds) cooked porkchop for rotten flesh drops from Zombified Piglins.
+commands:
+  zpiglinpork:
+    description: Reload ZPiglinPork config.
+    usage: /<command> reload
+permissions:
+  zpiglinpork.reload:
+    description: Allows reloading the plugin config.
+    default: op

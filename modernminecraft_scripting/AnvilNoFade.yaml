@@ -1,0 +1,6 @@
+name: AnvilNoFade
+main: com.redchanit.anvilnofade.AnvilNoFade
+version: 1.0
+api-version: 1.21
+description: Prevents anvils from taking durability damage when used (no chunk scanning).
+author: ChatGPT

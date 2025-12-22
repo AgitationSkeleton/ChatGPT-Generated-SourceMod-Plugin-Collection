@@ -1,0 +1,6 @@
+name: TillSeeds
+main: com.redchanit.tillseeds.TillSeeds
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Tilling grass blocks with a hoe has a 12.5% chance to drop a wheat seed.

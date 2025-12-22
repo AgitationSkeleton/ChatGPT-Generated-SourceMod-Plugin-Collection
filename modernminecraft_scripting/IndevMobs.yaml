@@ -1,0 +1,7 @@
+name: IndevMobs
+main: com.redchanit.indevmobs.IndevMobs
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Adds Indev-era humanoid passive mobs (Rana/Steve/Black Steve/Beast Boy) using Citizens NPCs and MineSkin signatures.
+softdepend: [Citizens]
