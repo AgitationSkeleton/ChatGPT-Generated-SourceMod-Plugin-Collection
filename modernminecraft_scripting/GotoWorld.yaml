@@ -1,0 +1,16 @@
+name: GotoWorld
+main: com.redchanit.gotoworld.GotoWorld
+version: 1.2
+api-version: 1.21
+author: ChatGPT
+description: /goto to any loaded world, /gotolist to list worlds, and /main for the default world.
+commands:
+  goto:
+    description: Teleport to a loaded world by name (use "main" for the default world).
+    usage: /goto <worldname>
+  gotolist:
+    description: List all loaded worlds available for /goto.
+    usage: /gotolist
+  main:
+    description: Teleport to the default world from server.properties (level-name).
+    usage: /main
