@@ -23,14 +23,16 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockIgniteEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
-import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
-import org.bukkit.inventory.InventoryView;
+import org.bukkit.event.inventory.InventoryOpenEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -52,13 +54,13 @@ public final class HerobrineGhost extends JavaPlugin {
     private final Set<UUID> markedPlayers = ConcurrentHashMap.newKeySet();
     private final Map<UUID, Long> lastTotemUseMillisByPlayer = new ConcurrentHashMap<>();
 
-    // Combat & UI state for ambience constraints
     private final Map<UUID, Long> lastCombatMillisByPlayer = new ConcurrentHashMap<>();
     private final Set<UUID> playersWithOpenInventory = ConcurrentHashMap.newKeySet();
 
-    // Ambient cue rate limiting
     private final Map<UUID, Long> lastAmbientCueMillisByPlayer = new ConcurrentHashMap<>();
     private final Map<UUID, Integer> ambientCueCountByPlayer = new ConcurrentHashMap<>();
+
+    private final Map<UUID, Long> lastTestCommandMillisByPlayer = new ConcurrentHashMap<>();
 
     private Set<String> excludedWorldNamesLower = new HashSet<>();
 
@@ -89,12 +91,12 @@ public final class HerobrineGhost extends JavaPlugin {
 
     // FOV / sighting behavior
     private boolean fovBiasEnabled = true;
-    private double minAngleFromViewDegrees = 70.0D; // spawn mostly outside view cone
+    private double minAngleFromViewDegrees = 70.0D;
 
     // Ambient system
     private boolean ambienceEnabled = true;
     private int ambienceMaxCuesPerSessionPerPlayer = 3;
-    private long ambienceMinMillisBetweenCues = 180L * 1000L; // 3 min
+    private long ambienceMinMillisBetweenCues = 180L * 1000L;
     private double ambienceChancePerCheckMarked = 0.02D;
     private double ambienceChancePerCheckUnmarked = 0.002D;
     private List<String> ambienceSoundNames = Arrays.asList(
@@ -108,6 +110,7 @@ public final class HerobrineGhost extends JavaPlugin {
 
     private ProtocolManager protocolManager;
     private GhostManager ghostManager;
+    private SkinCache skinCache;
 
     // -----------------------------
     // Plugin lifecycle
@@ -124,7 +127,9 @@ public final class HerobrineGhost extends JavaPlugin {
         }
 
         protocolManager = ProtocolLibrary.getProtocolManager();
-        ghostManager = new GhostManager(this, protocolManager);
+        skinCache = new SkinCache(this);
+
+        ghostManager = new GhostManager(this, protocolManager, skinCache);
 
         Bukkit.getPluginManager().registerEvents(new TotemListener(this), this);
         Bukkit.getPluginManager().registerEvents(new CombatAndUiListener(this), this);
@@ -137,6 +142,9 @@ public final class HerobrineGhost extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (skinCache != null) {
+            skinCache.saveQuietly();
+        }
         getLogger().info("Disabled.");
     }
 
@@ -176,7 +184,8 @@ public final class HerobrineGhost extends JavaPlugin {
             defaults.set("fovBias.enabled", true);
             defaults.set("fovBias.minAngleFromViewDegrees", 70.0);
 
-            defaults.set("totem.mode", 1); // 0 off, 1 lightning+mark, 2 +ghost+message
+            // 0=off, 1=lightning+mark (default), 2=lightning+mark + brief ghost + message
+            defaults.set("totem.mode", 1);
 
             defaults.set("ambience.enabled", true);
             defaults.set("ambience.maxCuesPerSessionPerPlayer", 3);
@@ -200,12 +209,16 @@ public final class HerobrineGhost extends JavaPlugin {
                     "You cannot escape."
             ));
 
+            defaults.set("debug.logProtocolWarnings", true);
+
             defaults.save(configFile);
             getLogger().info("Wrote default config.yml");
         } catch (IOException e) {
             getLogger().warning("Failed to write default config.yml: " + e.getMessage());
         }
     }
+
+    private boolean debugLogProtocolWarnings = true;
 
     private void reloadLocalConfig() {
         reloadConfig();
@@ -267,6 +280,8 @@ public final class HerobrineGhost extends JavaPlugin {
             if (!cleaned.isEmpty()) summonLines = cleaned;
         }
 
+        debugLogProtocolWarnings = config.getBoolean("debug.logProtocolWarnings", true);
+
         getLogger().info("Config loaded. excludedWorlds=" + excludedWorldNamesLower);
     }
 
@@ -280,7 +295,8 @@ public final class HerobrineGhost extends JavaPlugin {
         if (args.length == 1 && args[0].equalsIgnoreCase("reload")) {
             ensureDefaultConfigFileExists();
             reloadLocalConfig();
-            sender.sendMessage("HerobrineGhost config reloaded. displayName=" + ghostDisplayName + ", skinFrom=" + skinFromUsername);
+            if (skinCache != null) skinCache.loadQuietly();
+            sender.sendMessage("HerobrineGhost config reloaded.");
             return true;
         }
 
@@ -289,6 +305,16 @@ public final class HerobrineGhost extends JavaPlugin {
                 sender.sendMessage("Only players can use the test command.");
                 return true;
             }
+
+            // Per-player cooldown to avoid API hammering
+            long now = System.currentTimeMillis();
+            Long last = lastTestCommandMillisByPlayer.get(player.getUniqueId());
+            if (last != null && (now - last) < 5000L) {
+                player.sendMessage("Not yet.");
+                return true;
+            }
+            lastTestCommandMillisByPlayer.put(player.getUniqueId(), now);
+
             GhostSpawnLogic.spawnTest(this, player, lifetimeTicks);
             sender.sendMessage("HerobrineGhost: test ghost spawn triggered.");
             return true;
@@ -319,10 +345,8 @@ public final class HerobrineGhost extends JavaPlugin {
             if (player == null || !player.isOnline()) continue;
             if (isWorldExcluded(player.getWorld())) continue;
 
-            // Ambient cues (can occur even without a sighting, but only when alone and safe)
             maybePlayAmbientCue(player, nowMillis);
 
-            // Sighting check
             if (!isPlayerEligibleForSighting(player, nowMillis)) continue;
 
             double localChance = chancePerCheck;
@@ -332,25 +356,8 @@ public final class HerobrineGhost extends JavaPlugin {
             if (random.nextDouble() <= localChance) {
                 GhostSpawnLogic.spawnRandomSighting(this, player, minDistanceBlocks, maxDistanceBlocks, lifetimeTicks);
                 lastSightingMillisByPlayer.put(player.getUniqueId(), nowMillis);
-
-                // After a sighting, optionally schedule a very small chance of a single follow-up cue shortly after.
-                schedulePostSightingCue(player);
             }
         }
-    }
-
-    private void schedulePostSightingCue(Player player) {
-        if (!ambienceEnabled) return;
-        if (ambienceMaxCuesPerSessionPerPlayer <= 0) return;
-
-        // Low probability, to keep it special
-        if (random.nextDouble() > 0.20D) return;
-
-        long delayTicks = 40L + (long) random.nextInt(200); // 2s to 12s
-        Bukkit.getScheduler().runTaskLater(this, () -> {
-            if (!player.isOnline()) return;
-            maybePlayAmbientCue(player, System.currentTimeMillis(), true);
-        }, delayTicks);
     }
 
     private boolean isPlayerEligibleForSighting(Player player, long nowMillis) {
@@ -360,23 +367,16 @@ public final class HerobrineGhost extends JavaPlugin {
         Long lastMillis = lastSightingMillisByPlayer.get(player.getUniqueId());
         if (lastMillis != null && nowMillis - lastMillis < sightingCooldownMillis) return false;
 
-        // Must be alone: no other players within 64 blocks
         if (!isPlayerAlone(player, 64.0D)) return false;
 
-        // Avoid combat moments
         if (isRecentlyInCombat(player, nowMillis, 10_000L)) return false;
 
-        // Avoid while inventory UI is open (keeps it “in-world”)
         if (playersWithOpenInventory.contains(player.getUniqueId())) return false;
 
         return true;
     }
 
     private void maybePlayAmbientCue(Player player, long nowMillis) {
-        maybePlayAmbientCue(player, nowMillis, false);
-    }
-
-    private void maybePlayAmbientCue(Player player, long nowMillis, boolean ignoreChanceGate) {
         if (!ambienceEnabled) return;
         if (ambienceMaxCuesPerSessionPerPlayer <= 0) return;
 
@@ -394,31 +394,27 @@ public final class HerobrineGhost extends JavaPlugin {
 
         boolean isMarked = markedPlayers.contains(playerId);
         double chance = isMarked ? ambienceChancePerCheckMarked : ambienceChancePerCheckUnmarked;
-        if (!ignoreChanceGate && random.nextDouble() > chance) return;
+        if (random.nextDouble() > chance) return;
 
-        // Pick a sound that exists
         Sound picked = pickValidSound();
         if (picked == null) return;
 
-        // Play it from a believable direction: behind or off to the side, not directly in front.
         Location soundLocation = computeOffscreenSoundLocation(player, 8.0D, 16.0D);
 
-        float volume = 0.25F + (random.nextFloat() * 0.20F); // 0.25–0.45
-        float pitch = 0.90F + (random.nextFloat() * 0.20F);  // 0.90–1.10
+        float volume = 0.25F + (random.nextFloat() * 0.20F);
+        float pitch = 0.90F + (random.nextFloat() * 0.20F);
 
         try {
             player.playSound(soundLocation, picked, volume, pitch);
             lastAmbientCueMillisByPlayer.put(playerId, nowMillis);
             ambientCueCountByPlayer.put(playerId, usedCount + 1);
         } catch (Throwable ignored) {
-            // If the sound enum exists but play fails for any reason, just skip.
         }
     }
 
     private Sound pickValidSound() {
         if (ambienceSoundNames == null || ambienceSoundNames.isEmpty()) return null;
 
-        // Try a few picks to find one that exists on this server.
         for (int attempt = 0; attempt < 6; attempt++) {
             String name = ambienceSoundNames.get(random.nextInt(ambienceSoundNames.size()));
             if (name == null) continue;
@@ -442,17 +438,14 @@ public final class HerobrineGhost extends JavaPlugin {
         if (forward.lengthSquared() < 0.0001) forward = new Vector(0, 0, 1);
         forward.normalize();
 
-        // Create a vector roughly behind or side-behind
-        Vector right = new Vector(-forward.getZ(), 0, forward.getX()); // 90 deg right
-        double behindWeight = 0.6D + (random.nextDouble() * 0.4D);     // 0.6–1.0
+        Vector right = new Vector(-forward.getZ(), 0, forward.getX());
+        double behindWeight = 0.6D + (random.nextDouble() * 0.4D);
         double sideWeight = (random.nextBoolean() ? 1 : -1) * (0.3D + random.nextDouble() * 0.7D);
 
         Vector direction = forward.clone().multiply(-behindWeight).add(right.multiply(sideWeight)).normalize();
 
         double distance = minDistance + (random.nextDouble() * (maxDistance - minDistance));
         Location loc = base.clone().add(direction.getX() * distance, 0.0D, direction.getZ() * distance);
-
-        // Put it around head level-ish
         loc.setY(base.getY() + 1.0D);
 
         return loc;
@@ -493,7 +486,7 @@ public final class HerobrineGhost extends JavaPlugin {
     }
 
     // -----------------------------
-    // Getters used by inner helpers
+    // Getters for helpers
     // -----------------------------
     private GhostManager getGhostManager() { return ghostManager; }
     private Random getRandom() { return random; }
@@ -503,6 +496,7 @@ public final class HerobrineGhost extends JavaPlugin {
     private long getLifetimeTicks() { return lifetimeTicks; }
     private long getTotemCooldownMillis() { return totemCooldownMillis; }
     private int getTotemMode() { return totemMode; }
+    private boolean shouldLogProtocolWarnings() { return debugLogProtocolWarnings; }
 
     private Long getLastTotemUseMillis(UUID playerId) { return lastTotemUseMillisByPlayer.get(playerId); }
     private void setLastTotemUseMillis(UUID playerId, long millis) { lastTotemUseMillisByPlayer.put(playerId, millis); }
@@ -521,12 +515,10 @@ public final class HerobrineGhost extends JavaPlugin {
     private static double clampDouble(double value, double min, double max) { return Math.max(min, Math.min(max, value)); }
 
     // =========================================================================
-    // Inner classes
+    // Listeners
     // =========================================================================
-
     private static final class TotemListener implements Listener {
         private final HerobrineGhost plugin;
-
         private TotemListener(HerobrineGhost plugin) { this.plugin = plugin; }
 
         @EventHandler
@@ -541,10 +533,7 @@ public final class HerobrineGhost extends JavaPlugin {
 
     private static final class CombatAndUiListener implements Listener {
         private final HerobrineGhost plugin;
-
-        private CombatAndUiListener(HerobrineGhost plugin) {
-            this.plugin = plugin;
-        }
+        private CombatAndUiListener(HerobrineGhost plugin) { this.plugin = plugin; }
 
         @EventHandler
         public void onDamage(EntityDamageEvent event) {
@@ -565,11 +554,13 @@ public final class HerobrineGhost extends JavaPlugin {
         }
     }
 
+    // =========================================================================
+    // Totem Logic
+    // =========================================================================
     private static final class TotemLogic {
         private TotemLogic() { }
 
         public static void handleTotemIgnite(HerobrineGhost plugin, Player player, Block fireTarget) {
-            // Fire must be placed on top of Netherrack
             Block netherrackBlock = fireTarget.getRelative(0, -1, 0);
             if (netherrackBlock.getType() != Material.NETHERRACK) return;
 
@@ -581,7 +572,6 @@ public final class HerobrineGhost extends JavaPlugin {
             long nowMillis = System.currentTimeMillis();
             Long lastUseMillis = plugin.getLastTotemUseMillis(player.getUniqueId());
             if (lastUseMillis != null && nowMillis - lastUseMillis < plugin.getTotemCooldownMillis()) {
-                // Silence is better here; but a small line is okay.
                 player.sendMessage("The air is still.");
                 return;
             }
@@ -589,18 +579,15 @@ public final class HerobrineGhost extends JavaPlugin {
             Location strikeLocation = netherrackBlock.getLocation().clone().add(0.5D, 1.0D, 0.5D);
             world.strikeLightningEffect(strikeLocation);
 
-            // Always: mark player and increase future hauntings
             plugin.markPlayer(player.getUniqueId());
             plugin.setLastTotemUseMillis(player.getUniqueId(), nowMillis);
             plugin.setLastSightingNow(player.getUniqueId());
 
             int mode = plugin.getTotemMode();
             if (mode >= 2) {
-                // Beta-like: brief ghost + message
                 GhostSpawnLogic.spawnAtTotem(plugin, player, netherrackBlock.getLocation(), plugin.getLifetimeTicks());
                 player.sendMessage("<" + plugin.getGhostDisplayName() + "> " + plugin.pickSummonLine());
             }
-            // mode 1: lightning only + silent haunting multiplier (already marked)
         }
 
         private static boolean isValidHerobrineTotem(HerobrineGhost plugin, Block netherrackBlock) {
@@ -611,7 +598,6 @@ public final class HerobrineGhost extends JavaPlugin {
             int centerY = netherrackBlock.getY();
             int centerZ = netherrackBlock.getZ();
 
-            // Base layer at y-1: center mossy cobblestone, surrounded by gold blocks
             int baseY = centerY - 1;
 
             Block centerBase = world.getBlockAt(centerX, baseY, centerZ);
@@ -625,7 +611,6 @@ public final class HerobrineGhost extends JavaPlugin {
                 }
             }
 
-            // Torches adjacent at the netherrack level
             Block northTorch = world.getBlockAt(centerX, centerY, centerZ - 1);
             Block southTorch = world.getBlockAt(centerX, centerY, centerZ + 1);
             Block westTorch  = world.getBlockAt(centerX - 1, centerY, centerZ);
@@ -640,6 +625,9 @@ public final class HerobrineGhost extends JavaPlugin {
         }
     }
 
+    // =========================================================================
+    // Sighting Logic
+    // =========================================================================
     private static final class GhostSpawnLogic {
         private GhostSpawnLogic() { }
 
@@ -648,22 +636,17 @@ public final class HerobrineGhost extends JavaPlugin {
             World world = playerLocation.getWorld();
             if (world == null || plugin.isExcludedWorld(world)) return;
 
-            // Try multiple candidates to satisfy FOV bias.
             for (int attempt = 0; attempt < 10; attempt++) {
                 Location ghostLocation = computeCandidateLocation(plugin, viewer, minDistance, maxDistance);
                 if (ghostLocation == null) continue;
 
                 if (plugin.isFovBiasEnabled()) {
                     double angle = computeAngleFromViewDegrees(viewer, ghostLocation);
-                    if (angle < plugin.getMinAngleFromViewDegrees()) {
-                        continue;
-                    }
+                    if (angle < plugin.getMinAngleFromViewDegrees()) continue;
                 }
 
-                // Face toward player
                 LookUtil.orientLocationTowards(ghostLocation, playerLocation);
 
-                // If too close, skip (keeps “ran into fog” vibe)
                 if (ghostLocation.distanceSquared(playerLocation) < 20.0D * 20.0D) continue;
 
                 plugin.getGhostManager().spawnGhostForViewer(viewer, ghostLocation, lifetimeTicks);
@@ -690,11 +673,8 @@ public final class HerobrineGhost extends JavaPlugin {
 
             Location ghostLocation = new Location(world, targetX + 0.5D, targetY, targetZ + 0.5D, 0.0F, 0.0F);
 
-            // Don’t spawn in solid blocks; nudge up if needed.
             Block occupyingBlock = world.getBlockAt(ghostLocation);
-            if (!occupyingBlock.isEmpty()) {
-                ghostLocation.setY(ghostLocation.getY() + 1.0D);
-            }
+            if (!occupyingBlock.isEmpty()) ghostLocation.setY(ghostLocation.getY() + 1.0D);
 
             return ghostLocation;
         }
@@ -803,79 +783,78 @@ public final class HerobrineGhost extends JavaPlugin {
         }
     }
 
-    private static final class SkinFetcher {
-        private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
-                .connectTimeout(Duration.ofSeconds(10))
-                .build();
+    // =========================================================================
+    // Skin Cache + Fetcher (429-safe)
+    // =========================================================================
+    private static final class SkinCache {
+        private final HerobrineGhost plugin;
 
-        private static final Pattern ID_PATTERN = Pattern.compile("\"id\"\\s*:\\s*\"([0-9a-fA-F]{32})\"");
-        private static final Pattern VALUE_PATTERN = Pattern.compile("\"value\"\\s*:\\s*\"([^\"]+)\"");
-        private static final Pattern SIGNATURE_PATTERN = Pattern.compile("\"signature\"\\s*:\\s*\"([^\"]+)\"");
+        private final File cacheFile;
+        private String cachedValue;
+        private String cachedSignature;
+        private long cachedAtMillis;
 
-        private SkinFetcher() { }
+        private long nextAllowedFetchMillis = 0L;
+        private long backoffMillis = 60_000L; // start at 1 minute
 
-        public static void applySkinFromUsernameBlocking(WrappedGameProfile targetProfile, String skinFromUsername) throws Exception {
-            if (skinFromUsername == null || skinFromUsername.isBlank()) {
-                throw new IllegalArgumentException("skinFromUsername is blank");
-            }
-
-            UUID skinUuid = fetchUuidForUsername(skinFromUsername);
-            SkinProperty skinProperty = fetchTexturesProperty(skinUuid);
-
-            targetProfile.getProperties().removeAll("textures");
-            targetProfile.getProperties().put("textures", new WrappedSignedProperty("textures", skinProperty.value, skinProperty.signature));
+        private SkinCache(HerobrineGhost plugin) {
+            this.plugin = plugin;
+            this.cacheFile = new File(plugin.getDataFolder(), "skin-cache.yml");
+            loadQuietly();
         }
 
-        private static UUID fetchUuidForUsername(String username) throws Exception {
-            String url = "https://api.mojang.com/users/profiles/minecraft/" + username;
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
-                throw new IllegalStateException("Failed to fetch UUID for " + username + " (HTTP " + response.statusCode() + ")");
+        public synchronized void loadQuietly() {
+            try {
+                if (!cacheFile.exists()) return;
+                YamlConfiguration yaml = YamlConfiguration.loadConfiguration(cacheFile);
+                cachedValue = yaml.getString("textures.value", null);
+                cachedSignature = yaml.getString("textures.signature", null);
+                cachedAtMillis = yaml.getLong("textures.cachedAtMillis", 0L);
+                nextAllowedFetchMillis = yaml.getLong("fetch.nextAllowedFetchMillis", 0L);
+                backoffMillis = Math.max(60_000L, yaml.getLong("fetch.backoffMillis", 60_000L));
+            } catch (Throwable ignored) {
             }
-
-            Matcher matcher = ID_PATTERN.matcher(response.body());
-            if (!matcher.find()) throw new IllegalStateException("Could not parse UUID for " + username);
-
-            String raw = matcher.group(1);
-            return uuidFromMojangId(raw);
         }
 
-        private static SkinProperty fetchTexturesProperty(UUID uuid) throws Exception {
-            String url = "https://sessionserver.mojang.com/session/minecraft/profile/" + uuid.toString().replace("-", "") + "?unsigned=false";
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
-                throw new IllegalStateException("Failed to fetch textures for " + uuid + " (HTTP " + response.statusCode() + ")");
+        public synchronized void saveQuietly() {
+            try {
+                if (!plugin.getDataFolder().exists()) plugin.getDataFolder().mkdirs();
+                YamlConfiguration yaml = new YamlConfiguration();
+                yaml.set("textures.value", cachedValue);
+                yaml.set("textures.signature", cachedSignature);
+                yaml.set("textures.cachedAtMillis", cachedAtMillis);
+                yaml.set("fetch.nextAllowedFetchMillis", nextAllowedFetchMillis);
+                yaml.set("fetch.backoffMillis", backoffMillis);
+                yaml.save(cacheFile);
+            } catch (Throwable ignored) {
             }
-
-            String body = response.body();
-
-            Matcher valueMatcher = VALUE_PATTERN.matcher(body);
-            Matcher signatureMatcher = SIGNATURE_PATTERN.matcher(body);
-
-            if (!valueMatcher.find()) throw new IllegalStateException("Could not parse textures value");
-            if (!signatureMatcher.find()) throw new IllegalStateException("Could not parse textures signature");
-
-            return new SkinProperty(valueMatcher.group(1), signatureMatcher.group(1));
         }
 
-        private static UUID uuidFromMojangId(String raw32) {
-            String withDashes = raw32.replaceFirst(
-                    "(\\p{XDigit}{8})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}+)",
-                    "$1-$2-$3-$4-$5"
-            );
-            return UUID.fromString(withDashes);
+        public synchronized Optional<SkinProperty> getCachedSkin() {
+            if (cachedValue == null || cachedSignature == null) return Optional.empty();
+            return Optional.of(new SkinProperty(cachedValue, cachedSignature));
+        }
+
+        public synchronized boolean canAttemptFetchNow(long nowMillis) {
+            return nowMillis >= nextAllowedFetchMillis;
+        }
+
+        public synchronized void recordFetchSuccess(String value, String signature, long nowMillis) {
+            cachedValue = value;
+            cachedSignature = signature;
+            cachedAtMillis = nowMillis;
+
+            // reset backoff
+            backoffMillis = 60_000L;
+            nextAllowedFetchMillis = nowMillis; // allowed immediately
+
+            saveQuietly();
+        }
+
+        public synchronized void recordFetchFailure(long nowMillis) {
+            nextAllowedFetchMillis = nowMillis + backoffMillis;
+            backoffMillis = Math.min(backoffMillis * 2L, 6L * 60L * 60L * 1000L); // cap at 6 hours
+            saveQuietly();
         }
 
         private static final class SkinProperty {
@@ -889,28 +868,162 @@ public final class HerobrineGhost extends JavaPlugin {
         }
     }
 
+    private static final class SkinFetcher {
+        private static final HttpClient HTTP_CLIENT = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofSeconds(10))
+                .build();
+
+        private static final Pattern ID_PATTERN = Pattern.compile("\"id\"\\s*:\\s*\"([0-9a-fA-F]{32})\"");
+        private static final Pattern VALUE_PATTERN = Pattern.compile("\"value\"\\s*:\\s*\"([^\"]+)\"");
+        private static final Pattern SIGNATURE_PATTERN = Pattern.compile("\"signature\"\\s*:\\s*\"([^\"]+)\"");
+
+        private SkinFetcher() { }
+
+        public static Optional<SkinCache.SkinProperty> fetchSkinPropertyBlocking(String skinFromUsername) throws Exception {
+            UUID skinUuid = fetchUuidForUsername(skinFromUsername);
+            return Optional.of(fetchTexturesProperty(skinUuid));
+        }
+
+        private static UUID fetchUuidForUsername(String username) throws Exception {
+            String url = "https://api.mojang.com/users/profiles/minecraft/" + username;
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(15))
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 429) {
+                throw new RateLimitedException("Rate limited fetching UUID (HTTP 429)");
+            }
+            if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
+                throw new IllegalStateException("Failed to fetch UUID for " + username + " (HTTP " + response.statusCode() + ")");
+            }
+
+            Matcher matcher = ID_PATTERN.matcher(response.body());
+            if (!matcher.find()) throw new IllegalStateException("Could not parse UUID for " + username);
+
+            String raw = matcher.group(1);
+            return uuidFromMojangId(raw);
+        }
+
+        private static SkinCache.SkinProperty fetchTexturesProperty(UUID uuid) throws Exception {
+            String url = "https://sessionserver.mojang.com/session/minecraft/profile/" + uuid.toString().replace("-", "") + "?unsigned=false";
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .timeout(Duration.ofSeconds(15))
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = HTTP_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() == 429) {
+                throw new RateLimitedException("Rate limited fetching textures (HTTP 429)");
+            }
+            if (response.statusCode() != 200 || response.body() == null || response.body().isBlank()) {
+                throw new IllegalStateException("Failed to fetch textures for " + uuid + " (HTTP " + response.statusCode() + ")");
+            }
+
+            String body = response.body();
+
+            Matcher valueMatcher = VALUE_PATTERN.matcher(body);
+            Matcher signatureMatcher = SIGNATURE_PATTERN.matcher(body);
+
+            if (!valueMatcher.find()) throw new IllegalStateException("Could not parse textures value");
+            if (!signatureMatcher.find()) throw new IllegalStateException("Could not parse textures signature");
+
+            return new SkinCache.SkinProperty(valueMatcher.group(1), signatureMatcher.group(1));
+        }
+
+        private static UUID uuidFromMojangId(String raw32) {
+            String withDashes = raw32.replaceFirst(
+                    "(\\p{XDigit}{8})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}{4})(\\p{XDigit}+)",
+                    "$1-$2-$3-$4-$5"
+            );
+            return UUID.fromString(withDashes);
+        }
+
+        private static final class RateLimitedException extends Exception {
+            private RateLimitedException(String message) { super(message); }
+        }
+    }
+
+    // =========================================================================
+    // Ghost Manager (ProtocolLib compatibility probe + graceful degradation)
+    // =========================================================================
     private static final class GhostManager {
         private final HerobrineGhost plugin;
         private final ProtocolManager protocolManager;
+        private final SkinCache skinCache;
 
-        private GhostManager(HerobrineGhost plugin, ProtocolManager protocolManager) {
+        private boolean protocolCompatible = true;
+        private boolean loggedProtocolWarning = false;
+
+        private GhostManager(HerobrineGhost plugin, ProtocolManager protocolManager, SkinCache skinCache) {
             this.plugin = plugin;
             this.protocolManager = protocolManager;
+            this.skinCache = skinCache;
+
+            probeProtocolCompatibility();
+        }
+
+        private void probeProtocolCompatibility() {
+            try {
+                PacketContainer test = protocolManager.createPacket(PacketType.Play.Server.PLAYER_INFO);
+
+                // Some incompatible ProtocolLib builds will give empty modifiers here.
+                int actionCount = safeModifierSize(() -> test.getPlayerInfoAction());
+                int dataCount = safeModifierSize(() -> test.getPlayerInfoDataLists());
+
+                if (actionCount <= 0 || dataCount <= 0) {
+                    protocolCompatible = false;
+                }
+            } catch (Throwable t) {
+                protocolCompatible = false;
+            }
+
+            if (!protocolCompatible) {
+                logProtocolWarningOnce("ProtocolLib appears incompatible with this server version. Ghost spawning will be disabled until ProtocolLib is updated for your MC version.");
+            }
+        }
+
+        private interface ModifierProvider { Object get() throws Exception; }
+
+        private int safeModifierSize(ModifierProvider provider) {
+            try {
+                Object modifier = provider.get();
+                // Many ProtocolLib modifiers have a size() method.
+                Method sizeMethod = modifier.getClass().getMethod("size");
+                Object size = sizeMethod.invoke(modifier);
+                if (size instanceof Integer) return (Integer) size;
+            } catch (Throwable ignored) {
+            }
+            return 0;
+        }
+
+        private void logProtocolWarningOnce(String message) {
+            if (loggedProtocolWarning) return;
+            loggedProtocolWarning = true;
+            if (plugin.shouldLogProtocolWarnings()) {
+                plugin.getLogger().warning(message);
+                plugin.getLogger().warning("You likely need a ProtocolLib build that supports 1.21.10 (dev build).");
+            }
         }
 
         public void spawnGhostForViewer(Player viewer, Location ghostLocation, long lifetimeTicks) {
             if (viewer == null || !viewer.isOnline()) return;
+
+            if (!protocolCompatible) {
+                // No spam. Just do nothing; ambience/totem still works.
+                logProtocolWarningOnce("Ghost spawn blocked due to ProtocolLib incompatibility.");
+                return;
+            }
 
             UUID ghostUuid = UUID.randomUUID();
             String ghostName = plugin.getGhostDisplayName();
             WrappedGameProfile ghostProfile = new WrappedGameProfile(ghostUuid, ghostName);
 
             Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                try {
-                    SkinFetcher.applySkinFromUsernameBlocking(ghostProfile, plugin.getSkinFromUsername());
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to fetch/apply skin from " + plugin.getSkinFromUsername() + ": " + e.getMessage());
-                }
+                applySkinWithCache(ghostProfile);
 
                 Bukkit.getScheduler().runTask(plugin, () -> {
                     if (!viewer.isOnline()) return;
@@ -918,10 +1031,17 @@ public final class HerobrineGhost extends JavaPlugin {
 
                     int entityId = plugin.getRandom().nextInt(Integer.MAX_VALUE);
 
-                    sendPlayerInfoAdd(viewer, ghostProfile);
-                    sendNamedEntitySpawn(viewer, entityId, ghostProfile.getUUID(), ghostLocation);
+                    boolean infoOk = sendPlayerInfoAdd(viewer, ghostProfile);
+                    if (!infoOk) {
+                        protocolCompatible = false;
+                        logProtocolWarningOnce("PLAYER_INFO packet write failed. Ghost spawning disabled until ProtocolLib is updated.");
+                        return;
+                    }
 
-                    // Head tracking
+                    if (!sendNamedEntitySpawn(viewer, entityId, ghostProfile.getUUID(), ghostLocation)) {
+                        return;
+                    }
+
                     long stepTicks = 5L;
                     for (long tickOffset = stepTicks; tickOffset < lifetimeTicks; tickOffset += stepTicks) {
                         long scheduledDelay = tickOffset;
@@ -933,14 +1053,12 @@ public final class HerobrineGhost extends JavaPlugin {
                         }, scheduledDelay);
                     }
 
-                    // Despawn + tab cleanup
                     Bukkit.getScheduler().runTaskLater(plugin, () -> {
                         if (!viewer.isOnline()) return;
                         sendDestroyEntity(viewer, entityId);
                         sendPlayerInfoRemove(viewer, ghostUuid, ghostName);
                     }, lifetimeTicks);
 
-                    // Remove from tab quickly
                     Bukkit.getScheduler().runTaskLater(plugin, () -> {
                         if (!viewer.isOnline()) return;
                         sendPlayerInfoRemove(viewer, ghostUuid, ghostName);
@@ -949,9 +1067,79 @@ public final class HerobrineGhost extends JavaPlugin {
             });
         }
 
-        private void sendPlayerInfoAdd(Player viewer, WrappedGameProfile profile) {
+        private void applySkinWithCache(WrappedGameProfile profile) {
+            long now = System.currentTimeMillis();
+
+            // Use cached skin if present.
+            Optional<SkinCache.SkinProperty> cached = skinCache.getCachedSkin();
+            if (cached.isPresent()) {
+                tryApplyTexturesProperty(profile, cached.get().value, cached.get().signature);
+                return;
+            }
+
+            // No cache; respect backoff.
+            if (!skinCache.canAttemptFetchNow(now)) {
+                return;
+            }
+
+            try {
+                Optional<SkinCache.SkinProperty> fetched = SkinFetcher.fetchSkinPropertyBlocking(plugin.getSkinFromUsername());
+                if (fetched.isPresent()) {
+                    SkinCache.SkinProperty prop = fetched.get();
+                    skinCache.recordFetchSuccess(prop.value, prop.signature, now);
+                    tryApplyTexturesProperty(profile, prop.value, prop.signature);
+                }
+            } catch (SkinFetcher.RateLimitedException rate) {
+                skinCache.recordFetchFailure(now);
+                // Do not log loudly; rate limiting is expected during testing.
+                plugin.getLogger().warning("Skin fetch rate-limited (HTTP 429). Backing off.");
+            } catch (Exception e) {
+                skinCache.recordFetchFailure(now);
+                plugin.getLogger().warning("Failed to fetch skin for " + plugin.getSkinFromUsername() + ": " + e.getMessage());
+            }
+        }
+
+        private void tryApplyTexturesProperty(WrappedGameProfile targetProfile, String value, String signature) {
+            // First try ProtocolLib wrapper properties if available.
+            try {
+                Object props = targetProfile.getProperties();
+                if (props != null) {
+                    // removeAll("textures"), put("textures", WrappedSignedProperty)
+                    targetProfile.getProperties().removeAll("textures");
+                    targetProfile.getProperties().put("textures", new WrappedSignedProperty("textures", value, signature));
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+
+            // Fallback: reflect into the underlying GameProfile handle without compile-time authlib dependency.
+            try {
+                Object handle = targetProfile.getHandle();
+                if (handle == null) return;
+
+                Method getPropertiesMethod = handle.getClass().getMethod("getProperties");
+                Object propertyMap = getPropertiesMethod.invoke(handle);
+                if (propertyMap == null) return;
+
+                Method removeAll = propertyMap.getClass().getMethod("removeAll", String.class);
+                removeAll.invoke(propertyMap, "textures");
+
+                // com.mojang.authlib.properties.Property("textures", value, signature)
+                Class<?> propertyClass = Class.forName("com.mojang.authlib.properties.Property");
+                Constructor<?> ctor = propertyClass.getConstructor(String.class, String.class, String.class);
+                Object propObj = ctor.newInstance("textures", value, signature);
+
+                Method put = propertyMap.getClass().getMethod("put", Object.class, Object.class);
+                put.invoke(propertyMap, "textures", propObj);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        private boolean sendPlayerInfoAdd(Player viewer, WrappedGameProfile profile) {
             try {
                 PacketContainer packet = protocolManager.createPacket(PacketType.Play.Server.PLAYER_INFO);
+
+                // This is where incompatible ProtocolLib builds blow up.
                 packet.getPlayerInfoAction().write(0, EnumWrappers.PlayerInfoAction.ADD_PLAYER);
 
                 PlayerInfoData infoData = new PlayerInfoData(
@@ -963,8 +1151,9 @@ public final class HerobrineGhost extends JavaPlugin {
 
                 packet.getPlayerInfoDataLists().write(0, Collections.singletonList(infoData));
                 protocolManager.sendServerPacket(viewer, packet);
-            } catch (Exception e) {
-                plugin.getLogger().warning("Could not send PLAYER_INFO add: " + e.getMessage());
+                return true;
+            } catch (Throwable t) {
+                return false;
             }
         }
 
@@ -992,11 +1181,11 @@ public final class HerobrineGhost extends JavaPlugin {
 
                 packet.getPlayerInfoDataLists().write(0, Collections.singletonList(infoData));
                 protocolManager.sendServerPacket(viewer, packet);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }
 
-        private void sendNamedEntitySpawn(Player viewer, int entityId, UUID ghostUuid, Location location) {
+        private boolean sendNamedEntitySpawn(Player viewer, int entityId, UUID ghostUuid, Location location) {
             try {
                 PacketContainer packet = protocolManager.createPacket(PacketType.Play.Server.NAMED_ENTITY_SPAWN);
 
@@ -1014,8 +1203,9 @@ public final class HerobrineGhost extends JavaPlugin {
                 packet.getBytes().write(1, pitch);
 
                 protocolManager.sendServerPacket(viewer, packet);
-            } catch (Exception e) {
-                plugin.getLogger().warning("Failed to send ghost spawn packet: " + e.getMessage());
+                return true;
+            } catch (Throwable ignored) {
+                return false;
             }
         }
 
@@ -1035,7 +1225,7 @@ public final class HerobrineGhost extends JavaPlugin {
                 headPacket.getIntegers().write(0, entityId);
                 headPacket.getBytes().write(0, yaw);
                 protocolManager.sendServerPacket(viewer, headPacket);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }
 
@@ -1044,7 +1234,7 @@ public final class HerobrineGhost extends JavaPlugin {
                 PacketContainer packet = protocolManager.createPacket(PacketType.Play.Server.ENTITY_DESTROY);
                 packet.getIntLists().write(0, Collections.singletonList(entityId));
                 protocolManager.sendServerPacket(viewer, packet);
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
             }
         }
     }

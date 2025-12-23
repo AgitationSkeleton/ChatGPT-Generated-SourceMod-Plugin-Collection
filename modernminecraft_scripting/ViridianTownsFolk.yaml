@@ -1,0 +1,16 @@
+name: ViridianTownsFolk
+main: com.redchanit.viridiantownsfolk.ViridianTownsFolk
+version: 1.3.3
+api-version: 1.21
+author: ChatGPT
+description: Populates dynmap marker sites with lively Citizens humanoid NPC townsfolk and procedural lore dialogue.
+softdepend: [Citizens, dynmap, WanderLore]
+commands:
+  viridiantownsfolk:
+    description: ViridianTownsFolk controls
+    aliases: [vtf]
+    usage: /<command> [list|reload|maintain|respawnsite <siteId>|purgeall [unsafe]|reset [unsafe]]
+permissions:
+  vtf.admin:
+    description: Allows managing ViridianTownsFolk
+    default: op

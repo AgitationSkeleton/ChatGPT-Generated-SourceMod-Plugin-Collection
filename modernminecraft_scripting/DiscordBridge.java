@@ -1,11 +1,9 @@
 // Author: ChatGPT
 // DiscordBridge (Spigot 1.21.10)
-// - Relays Minecraft chat/events -> Discord via webhook
+// - Relays Minecraft chat/events -> Discord via webhook (player avatar via Minotar isometric cube)
 // - Relays Discord channel messages -> Minecraft via JDA bot
 //
-// Notes:
-// - Uses modern hooks (AsyncPlayerChatEvent, PlayerDeathEvent, etc.)
-// - Requires JDA on the runtime classpath (or shaded into the plugin JAR)
+// No config changes required.
 
 package com.example.discordbridge;
 
@@ -45,12 +43,14 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     private long relayChannelId;
     private String serverName;
 
-    // Optional behavior toggles
     private boolean relayJoinQuit;
     private boolean relayChat;
     private boolean relayDeaths;
     private boolean relayCommands;
     private boolean stripColorCodesInWebhook;
+
+    // Minotar "Isometric Head" (cube) PNG
+    private static final int AVATAR_SIZE = 64;
 
     @Override
     public void onEnable() {
@@ -63,10 +63,8 @@ public class DiscordBridge extends JavaPlugin implements Listener {
             return;
         }
 
-        // Register Spigot listeners
         Bukkit.getPluginManager().registerEvents(this, this);
 
-        // Start JDA
         try {
             jda = JDABuilder.createDefault(
                             botToken,
@@ -82,7 +80,8 @@ public class DiscordBridge extends JavaPlugin implements Listener {
             return;
         }
 
-        sendToDiscordWebhookAsync(serverName, "Server has started.");
+        // Server lifecycle messages: keep server name, no avatar override
+        sendToDiscordWebhookAsync(serverName, null, "Server has started.");
         getLogger().info("Enabled DiscordBridge.");
     }
 
@@ -90,8 +89,8 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     public void onDisable() {
         try {
             if (isDiscordConfigured()) {
-                sendToDiscordWebhook(serverName, "Server is stopping...");
-                sendToDiscordWebhook(serverName, "Server has stopped.");
+                sendToDiscordWebhook(serverName, null, "Server is stopping...");
+                sendToDiscordWebhook(serverName, null, "Server has stopped.");
             }
         } catch (Exception e) {
             e.printStackTrace();
@@ -107,10 +106,6 @@ public class DiscordBridge extends JavaPlugin implements Listener {
 
         getLogger().info("Disabled DiscordBridge.");
     }
-
-    // -------------------------------------------------------------------------
-    // Config
-    // -------------------------------------------------------------------------
 
     private void loadSettings() {
         FileConfiguration cfg = getConfig();
@@ -152,19 +147,12 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     private final class DiscordMessageListener extends ListenerAdapter {
         @Override
         public void onMessageReceived(MessageReceivedEvent event) {
-            if (event.getAuthor().isBot()) {
-                return;
-            }
-            if (event.getChannel().getIdLong() != relayChannelId) {
-                return;
-            }
+            if (event.getAuthor().isBot()) return;
+            if (event.getChannel().getIdLong() != relayChannelId) return;
 
             final String authorName = event.getAuthor().getName();
             final String content = event.getMessage().getContentDisplay();
-
-            if (content == null || content.trim().isEmpty()) {
-                return;
-            }
+            if (content == null || content.trim().isEmpty()) return;
 
             final String mcMessage = ChatColor.BLUE + "[Discord] " + ChatColor.AQUA + authorName + ChatColor.GRAY + ": "
                     + ChatColor.WHITE + content;
@@ -177,11 +165,10 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     // Minecraft -> Discord (Webhook)
     // -------------------------------------------------------------------------
 
-    private void sendToDiscordWebhookAsync(final String username, final String message) {
-        // Use Bukkit async scheduler (modern + clean shutdown behavior)
+    private void sendToDiscordWebhookAsync(final String username, final String avatarUrl, final String message) {
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             try {
-                sendToDiscordWebhook(username, message);
+                sendToDiscordWebhook(username, avatarUrl, message);
             } catch (Exception e) {
                 getLogger().warning("Failed to send webhook message:");
                 e.printStackTrace();
@@ -189,7 +176,7 @@ public class DiscordBridge extends JavaPlugin implements Listener {
         });
     }
 
-    private void sendToDiscordWebhook(String username, String message) throws Exception {
+    private void sendToDiscordWebhook(String username, String avatarUrl, String message) throws Exception {
         if (webhookUrl == null || webhookUrl.isEmpty()) {
             return;
         }
@@ -213,7 +200,7 @@ public class DiscordBridge extends JavaPlugin implements Listener {
             connection.setReadTimeout(12000);
             connection.setRequestProperty("Content-Type", "application/json");
 
-            String payload = buildWebhookPayload(finalUsername, finalMessage);
+            String payload = buildWebhookPayload(finalUsername, avatarUrl, finalMessage);
 
             byte[] bytes = payload.getBytes(StandardCharsets.UTF_8);
             connection.setFixedLengthStreamingMode(bytes.length);
@@ -236,62 +223,65 @@ public class DiscordBridge extends JavaPlugin implements Listener {
                 }
             }
         } finally {
-            if (connection != null) {
-                connection.disconnect();
-            }
+            if (connection != null) connection.disconnect();
         }
     }
 
-    private String buildWebhookPayload(String username, String message) {
+    private String buildWebhookPayload(String username, String avatarUrl, String message) {
         String safeUsername = escapeJson(username);
         String safeMessage = escapeJson(message);
 
-        return "{"
-                + "\"username\":\"" + safeUsername + "\","
-                + "\"content\":\"" + safeMessage + "\""
-                + "}";
+        StringBuilder payload = new StringBuilder(256);
+        payload.append("{");
+        payload.append("\"username\":\"").append(safeUsername).append("\",");
+
+        if (avatarUrl != null && !avatarUrl.trim().isEmpty()) {
+            payload.append("\"avatar_url\":\"").append(escapeJson(avatarUrl.trim())).append("\",");
+        }
+
+        payload.append("\"content\":\"").append(safeMessage).append("\"");
+        payload.append("}");
+        return payload.toString();
     }
 
     private String escapeJson(String text) {
-        if (text == null) {
-            return "";
-        }
-
+        if (text == null) return "";
         StringBuilder builder = new StringBuilder(text.length() + 16);
         for (int index = 0; index < text.length(); index++) {
             char currentChar = text.charAt(index);
             switch (currentChar) {
-                case '\\':
-                    builder.append("\\\\");
-                    break;
-                case '"':
-                    builder.append("\\\"");
-                    break;
-                case '\b':
-                    builder.append("\\b");
-                    break;
-                case '\f':
-                    builder.append("\\f");
-                    break;
-                case '\n':
-                    builder.append("\\n");
-                    break;
-                case '\r':
-                    builder.append("\\r");
-                    break;
-                case '\t':
-                    builder.append("\\t");
-                    break;
+                case '\\': builder.append("\\\\"); break;
+                case '"': builder.append("\\\""); break;
+                case '\b': builder.append("\\b"); break;
+                case '\f': builder.append("\\f"); break;
+                case '\n': builder.append("\\n"); break;
+                case '\r': builder.append("\\r"); break;
+                case '\t': builder.append("\\t"); break;
                 default:
-                    if (currentChar < 0x20) {
-                        builder.append(String.format("\\u%04x", (int) currentChar));
-                    } else {
-                        builder.append(currentChar);
-                    }
+                    if (currentChar < 0x20) builder.append(String.format("\\u%04x", (int) currentChar));
+                    else builder.append(currentChar);
                     break;
             }
         }
         return builder.toString();
+    }
+
+    // -------------------------------------------------------------------------
+    // Avatar URL (Minotar isometric cube)
+    // -------------------------------------------------------------------------
+
+    private String getIsometricAvatarUrlForName(String playerName) {
+        if (playerName == null) return null;
+        String name = playerName.trim();
+        if (name.isEmpty()) return null;
+
+        // Minotar docs: https://minotar.net/cube/user/100.png :contentReference[oaicite:3]{index=3}
+        return "https://minotar.net/cube/" + urlEncodeLoose(name) + "/" + AVATAR_SIZE + ".png";
+    }
+
+    private String urlEncodeLoose(String text) {
+        // MC usernames are safe; this is only defensive
+        return text.replace(" ", "%20");
     }
 
     // -------------------------------------------------------------------------
@@ -301,36 +291,31 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerJoin(PlayerJoinEvent event) {
         if (!relayJoinQuit) return;
-
         Player player = event.getPlayer();
-        sendToDiscordWebhookAsync("Join/Quit", player.getName() + " joined the game.");
+        sendToDiscordWebhookAsync(player.getName(), getIsometricAvatarUrlForName(player.getName()), player.getName() + " joined the game.");
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onPlayerQuit(PlayerQuitEvent event) {
         if (!relayJoinQuit) return;
-
         Player player = event.getPlayer();
-        sendToDiscordWebhookAsync("Join/Quit", player.getName() + " left the game.");
+        sendToDiscordWebhookAsync(player.getName(), getIsometricAvatarUrlForName(player.getName()), player.getName() + " left the game.");
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerChat(AsyncPlayerChatEvent event) {
         if (!relayChat) return;
-
         Player player = event.getPlayer();
-        String message = event.getMessage();
-        sendToDiscordWebhookAsync("Chat", player.getName() + ": " + message);
+        sendToDiscordWebhookAsync(player.getName(), getIsometricAvatarUrlForName(player.getName()), event.getMessage());
     }
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onPlayerCommandPreprocess(PlayerCommandPreprocessEvent event) {
         if (!relayCommands) return;
-
         Player player = event.getPlayer();
         String message = event.getMessage();
         if (message != null && message.startsWith("/")) {
-            sendToDiscordWebhookAsync("Commands", player.getName() + " used command: " + message);
+            sendToDiscordWebhookAsync(player.getName(), getIsometricAvatarUrlForName(player.getName()), "used command: " + message);
         }
     }
 
@@ -338,13 +323,12 @@ public class DiscordBridge extends JavaPlugin implements Listener {
     public void onPlayerDeath(PlayerDeathEvent event) {
         if (!relayDeaths) return;
 
-        // Modern: use the actual computed death message from the server (no spoofing)
+        Player victim = event.getEntity();
         String deathMessage = event.getDeathMessage();
         if (deathMessage == null || deathMessage.trim().isEmpty()) {
-            Player victim = event.getEntity();
             deathMessage = victim.getName() + " died.";
         }
 
-        sendToDiscordWebhookAsync("Deaths", deathMessage);
+        sendToDiscordWebhookAsync(victim.getName(), getIsometricAvatarUrlForName(victim.getName()), deathMessage);
     }
 }

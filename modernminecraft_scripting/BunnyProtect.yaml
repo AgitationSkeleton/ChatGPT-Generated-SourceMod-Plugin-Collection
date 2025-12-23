@@ -1,0 +1,6 @@
+name: BunnyProtect
+main: com.redchanit.bunnyprotect.BunnyProtect
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Protects nametagged rabbits from all sources of damage.
