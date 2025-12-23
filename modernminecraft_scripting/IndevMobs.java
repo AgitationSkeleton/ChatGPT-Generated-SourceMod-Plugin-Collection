@@ -2,6 +2,13 @@
 // Author: ChatGPT
 package com.redchanit.indevmobs;
 
+import net.citizensnpcs.api.CitizensAPI;
+import net.citizensnpcs.api.npc.NPC;
+import net.citizensnpcs.api.npc.NPCRegistry;
+import net.citizensnpcs.api.trait.Trait;
+import net.citizensnpcs.api.trait.trait.Equipment;
+import net.citizensnpcs.trait.SkinTrait;
+import net.citizensnpcs.api.ai.Navigator;
 import org.bukkit.Bukkit;
 import org.bukkit.Chunk;
 import org.bukkit.Location;
@@ -13,6 +20,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -24,53 +32,54 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
-import org.bukkit.scoreboard.Scoreboard;
-import org.bukkit.scoreboard.Team;
+import org.bukkit.event.world.ChunkLoadEvent;
 
-import java.io.BufferedInputStream;
-import java.io.BufferedReader;
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
+
+import java.io.*;
 import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import org.bukkit.Material;
 
 public final class IndevMobs extends JavaPlugin implements Listener {
 
-    // Persistent tags on the Bukkit entity
+    // PDC markers
     private NamespacedKey indevMobKey;
     private NamespacedKey indevMobTypeKey;
 
-    // Citizens present?
+    // Citizens
     private boolean citizensAvailable = false;
 
-    // MineSkin cache: mobType -> signature/value
+    // Citizens persistent data keys (stored on NPCs so they survive restarts)
+    private static final String CIT_KEY_INDEVMOBS = "indevmobs";
+    private static final String CIT_KEY_TYPE = "indevmobs_type";
+
+    // skin cache: mobType -> SkinData(value,signature)
     private final Map<String, SkinData> skinCache = new ConcurrentHashMap<>();
 
-    // Active spawned entity UUID -> mobType
+    // entity UUID -> mobType
     private final Map<UUID, String> spawnedEntities = new ConcurrentHashMap<>();
 
-    // Spawner task
+    // entity UUID -> NPC id (Citizens)
+    private final Map<UUID, Integer> citizensNpcIdByEntity = new ConcurrentHashMap<>();
+
+    // tasks
     private int spawnTaskId = -1;
+    private int wanderTaskId = -1;
+    private int dynmapTaskId = -1;
+    private int enforceTaskId = -1;
+    private int adoptTaskId = -1;
 
-    // Dynmap integration (reflection)
-    private Plugin dynmapPlugin;
+    // Dynmap (reflection, no compile dep)
     private boolean dynmapAvailable = false;
-    private Object dynmapMarkerApi; // MarkerAPI
-    private Object dynmapMarkerSet; // MarkerSet
-    private final Map<UUID, Object> dynmapMarkersByEntity = new ConcurrentHashMap<>();
-    private int dynmapUpdateTaskId = -1;
-
-    // Nametag hiding team
-    private Scoreboard indevScoreboard;
-    private Team indevNoTagTeam;
+    private Plugin dynmapPlugin = null;
+    private Object dynmapApi = null;         // org.dynmap.DynmapAPI
+    private Object dynmapMarkerApi = null;   // org.dynmap.markers.MarkerAPI
+    private Object dynmapMarkerSet = null;   // org.dynmap.markers.MarkerSet
+    private final Map<UUID, Object> dynmapMarkerByEntity = new ConcurrentHashMap<>();
 
     @Override
     public void onEnable() {
@@ -80,8 +89,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         ensureConfigDefaults();
         ensureSkinFolder();
         loadSkinCacheFromConfig();
-
-        setupNametagHidingTeam();
 
         Plugin citizensPlugin = Bukkit.getPluginManager().getPlugin("Citizens");
         citizensAvailable = (citizensPlugin != null && citizensPlugin.isEnabled());
@@ -105,28 +112,40 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         }
 
         startSpawner();
+        startWanderLoop();
         startDynmapUpdater();
+        startEnforceLoop();
+
+        // Adopt/refresh any existing NPCs (including legacy ones) after the server is up
+        scheduleAdoptPass();
+
+
     }
 
     @Override
     public void onDisable() {
-        if (spawnTaskId != -1) {
-            Bukkit.getScheduler().cancelTask(spawnTaskId);
-            spawnTaskId = -1;
-        }
-        if (dynmapUpdateTaskId != -1) {
-            Bukkit.getScheduler().cancelTask(dynmapUpdateTaskId);
-            dynmapUpdateTaskId = -1;
-        }
+        if (spawnTaskId != -1) Bukkit.getScheduler().cancelTask(spawnTaskId);
+        if (wanderTaskId != -1) Bukkit.getScheduler().cancelTask(wanderTaskId);
+        if (dynmapTaskId != -1) Bukkit.getScheduler().cancelTask(dynmapTaskId);
+        if (enforceTaskId != -1) Bukkit.getScheduler().cancelTask(enforceTaskId);
+        if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
 
-        // Cleanup dynmap markers
-        try {
-            for (Object marker : dynmapMarkersByEntity.values()) {
-                safeInvoke(marker, "deleteMarker");
-            }
-        } catch (Throwable ignored) {}
-        dynmapMarkersByEntity.clear();
+        spawnTaskId = -1;
+        wanderTaskId = -1;
+        dynmapTaskId = -1;
+        enforceTaskId = -1;
+        adoptTaskId = -1;
+
+        // delete dynmap markers
+        for (Object marker : dynmapMarkerByEntity.values()) {
+            try {
+                marker.getClass().getMethod("deleteMarker").invoke(marker);
+            } catch (Throwable ignored) {}
+        }
+        dynmapMarkerByEntity.clear();
+
         spawnedEntities.clear();
+        citizensNpcIdByEntity.clear();
     }
 
     // -------------------------------------------------------------------------
@@ -148,7 +167,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             reloadConfig();
             ensureSkinFolder();
             loadSkinCacheFromConfig();
-            setupNametagHidingTeam();
             initDynmap();
             sender.sendMessage("IndevMobs config reloaded.");
             return true;
@@ -158,21 +176,14 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             sender.sendMessage("IndevMobs v" + getDescription().getVersion());
             sender.sendMessage("Citizens: " + (citizensAvailable ? "OK" : "MISSING"));
             sender.sendMessage("Dynmap: " + (dynmapAvailable ? "OK" : "MISSING/DISABLED"));
-            sender.sendMessage("Tracked alive indev mobs: " + countAliveAllWorlds());
+            sender.sendMessage("Tracked indev mobs (alive): " + countAliveAllWorlds());
             sender.sendMessage("Skin cache keys: " + skinCache.keySet());
 
             File skinDir = getSkinDirectory();
             sender.sendMessage("Local skins folder: " + skinDir.getPath());
             for (String type : getMobTypes()) {
-                File f = new File(skinDir, type + ".png");
-                sender.sendMessage(" - " + type + ".png: " + (f.exists() ? (f.length() + " bytes") : "MISSING"));
-            }
-
-            ConfigurationSection cached = getConfig().getConfigurationSection("skins.cached");
-            if (cached == null || cached.getKeys(false).isEmpty()) {
-                sender.sendMessage("Config skins.cached: EMPTY");
-            } else {
-                sender.sendMessage("Config skins.cached keys: " + cached.getKeys(false));
+                File skinFile = new File(skinDir, type + ".png");
+                sender.sendMessage(" - " + type + ".png: " + (skinFile.exists() ? (skinFile.length() + " bytes") : "MISSING"));
             }
             return true;
         }
@@ -192,29 +203,26 @@ public final class IndevMobs extends JavaPlugin implements Listener {
                 return true;
             }
 
-            String chosen;
+            String chosenType;
             if (mobTypeArg.equals("random")) {
-                chosen = pickMobTypeByWeight();
-                if (chosen == null) chosen = "rana";
+                chosenType = pickMobTypeByWeight();
+                if (chosenType == null) chosenType = "rana";
             } else {
-                chosen = mobTypeArg;
+                chosenType = mobTypeArg;
             }
 
-            if (!getMobTypes().contains(chosen)) {
+            if (!getMobTypes().contains(chosenType)) {
                 player.sendMessage("Unknown type. Use rana|steve|blacksteve|beastboy|random");
                 return true;
             }
 
-            Location loc = player.getLocation().clone();
-            Location forward = loc.add(loc.getDirection().normalize().multiply(4.0));
-            forward.setY(player.getWorld().getHighestBlockYAt(forward) + 1.0);
+            Location base = player.getLocation().clone();
+            Location spawnLoc = base.add(base.getDirection().normalize().multiply(4.0));
+            spawnLoc.setY(player.getWorld().getHighestBlockYAt(spawnLoc) + 1.0);
 
-            boolean ok = spawnIndevNpc(chosen, forward);
-            if (ok) {
-                player.sendMessage("Spawned " + chosen + " near you.");
-            } else {
-                player.sendMessage("Spawn FAILED. Check console or /indevmobs status.");
-            }
+            boolean ok = spawnIndevNpc(chosenType, spawnLoc);
+            if (ok) player.sendMessage("Spawned " + chosenType + " near you.");
+            else player.sendMessage("Spawn FAILED. Check console or /indevmobs status.");
             return true;
         }
 
@@ -224,12 +232,14 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
     private int countAliveAllWorlds() {
         int total = 0;
-        Iterator<Map.Entry<UUID, String>> it = spawnedEntities.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<UUID, String> e = it.next();
-            Entity ent = Bukkit.getEntity(e.getKey());
+        Iterator<Map.Entry<UUID, String>> iterator = spawnedEntities.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, String> entry = iterator.next();
+            Entity ent = Bukkit.getEntity(entry.getKey());
             if (ent == null || !ent.isValid() || ent.isDead()) {
-                it.remove();
+                iterator.remove();
+                citizensNpcIdByEntity.remove(entry.getKey());
+                removeDynmapMarker(entry.getKey());
                 continue;
             }
             total++;
@@ -238,7 +248,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     }
 
     // -------------------------------------------------------------------------
-    // Config defaults (no embedded config.yml)
+    // Config defaults
     // -------------------------------------------------------------------------
 
     private void ensureConfigDefaults() {
@@ -254,7 +264,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         cfg.addDefault("spawning.minDistanceFromPlayer", 24.0);
         cfg.addDefault("spawning.locationTries", 12);
         cfg.addDefault("spawning.maxPerWorld", 20);
-        cfg.addDefault("spawning.despawnIfNoPlayersWithin", 128.0);
 
         cfg.addDefault("spawning.weights.rana", 1.0);
         cfg.addDefault("spawning.weights.steve", 1.0);
@@ -264,27 +273,31 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         cfg.addDefault("sounds.hurt.volume", 1.0);
         cfg.addDefault("sounds.hurt.pitch", 1.0);
 
+        // wandering
+        cfg.addDefault("wander.enabled", true);
+        cfg.addDefault("wander.tickPeriod", 40);
+        cfg.addDefault("wander.targetChanceWhenIdle", 0.50);
+        cfg.addDefault("wander.verticalSearch", 3);
+
         cfg.addDefault("skins.preloadOnEnable", true);
         cfg.addDefault("skins.allowMineskinRequests", true);
         cfg.addDefault("skins.mineskinApiKey", "");
-        cfg.addDefault("skins.userAgent", "IndevMobs/1.2.2");
+        cfg.addDefault("skins.userAgent", "IndevMobs/1.4");
         cfg.addDefault("skins.variant", "classic");
         cfg.addDefault("skins.visibility", "unlisted");
-
         cfg.addDefault("skins.useLocalFiles", true);
         cfg.addDefault("skins.localFolderName", "skins");
-        cfg.addDefault("skins.autoDownloadIfMissing", false);
 
-        // URLs only used if you toggle autoDownloadIfMissing or if local files are missing and URLs are present
+        // URLs are only informational now (you chose local files), but keep them
         cfg.addDefault("skins.urls.rana", "https://files.catbox.moe/yo0n7z.png");
         cfg.addDefault("skins.urls.steve", "https://files.catbox.moe/lj5tkg.png");
         cfg.addDefault("skins.urls.blacksteve", "https://files.catbox.moe/ue85z2.png");
         cfg.addDefault("skins.urls.beastboy", "https://files.catbox.moe/p9lszo.png");
 
-        addMobDefaults(cfg, "rana", "Rana");
-        addMobDefaults(cfg, "steve", "Steve");
-        addMobDefaults(cfg, "blacksteve", "Black Steve");
-        addMobDefaults(cfg, "beastboy", "Beast Boy");
+        addMobDefaults(cfg, "rana", "Rana", "IndevRana");
+        addMobDefaults(cfg, "steve", "Steve", "IndevSteve");
+        addMobDefaults(cfg, "blacksteve", "Black Steve", "IndevBlkSteve");
+        addMobDefaults(cfg, "beastboy", "Beast Boy", "IndevBeastBoy");
 
         addCommonSteveDrops(cfg, "drops.steve");
         addCommonSteveDrops(cfg, "drops.blacksteve");
@@ -299,36 +312,26 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         cfg.addDefault("drops.rana.rare.FLINT_AND_STEEL.min", 0);
         cfg.addDefault("drops.rana.rare.FLINT_AND_STEEL.max", 1);
 
-        // Dynmap NPCs marker layer (shared)
+        // Dynmap marker layer
         cfg.addDefault("dynmap.enabled", true);
         cfg.addDefault("dynmap.markerSetId", "npcs");
         cfg.addDefault("dynmap.markerSetLabel", "NPCs");
         cfg.addDefault("dynmap.updateTicks", 40);
 
-        cfg.addDefault("dynmap.icons.rana.id", "npc_rana");
-        cfg.addDefault("dynmap.icons.rana.label", "Rana");
-        cfg.addDefault("dynmap.icons.rana.url", "https://minecraft.wiki/images/EntitySprite_rana.png?3f2f9");
-
-        cfg.addDefault("dynmap.icons.steve.id", "npc_steve");
-        cfg.addDefault("dynmap.icons.steve.label", "Steve");
-        cfg.addDefault("dynmap.icons.steve.url", "https://minecraft.wiki/images/EntitySprite_dock-steve.png?9897e");
-
-        cfg.addDefault("dynmap.icons.blacksteve.id", "npc_blacksteve");
-        cfg.addDefault("dynmap.icons.blacksteve.label", "Black Steve");
-        cfg.addDefault("dynmap.icons.blacksteve.url", "https://minecraft.wiki/images/EntitySprite_black-steve.png?60477");
-
-        cfg.addDefault("dynmap.icons.beastboy.id", "npc_beastboy");
-        cfg.addDefault("dynmap.icons.beastboy.label", "Beast Boy");
-        cfg.addDefault("dynmap.icons.beastboy.url", "https://minecraft.wiki/images/EntitySprite_beast-boy.png?ecb48");
+        // icon IDs (must exist in Dynmap marker icons)
+        cfg.addDefault("dynmap.icons.rana", "indev_rana");
+        cfg.addDefault("dynmap.icons.steve", "indev_steve");
+        cfg.addDefault("dynmap.icons.blacksteve", "indev_blacksteve");
+        cfg.addDefault("dynmap.icons.beastboy", "indev_beastboy");
 
         cfg.options().copyDefaults(true);
         saveConfig();
     }
 
-    private void addMobDefaults(FileConfiguration cfg, String mobKey, String displayName) {
+    private void addMobDefaults(FileConfiguration cfg, String mobKey, String displayName, String profileName) {
         cfg.addDefault("mobs." + mobKey + ".displayName", displayName);
+        cfg.addDefault("mobs." + mobKey + ".profileName", profileName);
         cfg.addDefault("mobs." + mobKey + ".maxHealth", 20.0);
-        cfg.addDefault("mobs." + mobKey + ".wander.tickPeriod", 80);     // only used as fallback; Citizens wander trait used
         cfg.addDefault("mobs." + mobKey + ".wander.radiusBlocks", 16);
         cfg.addDefault("mobs." + mobKey + ".wander.speed", 1.0);
     }
@@ -345,6 +348,10 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         cfg.addDefault(basePath + ".rare.FLINT_AND_STEEL.max", 1);
     }
 
+    private List<String> getMobTypes() {
+        return Arrays.asList("rana", "steve", "blacksteve", "beastboy");
+    }
+
     // -------------------------------------------------------------------------
     // Skins folder
     // -------------------------------------------------------------------------
@@ -355,30 +362,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             boolean ok = dir.mkdirs();
             if (ok) getLogger().info("Created skin folder: " + dir.getPath());
         }
-
-        if (!getConfig().getBoolean("skins.autoDownloadIfMissing", false)) return;
-
-        for (String type : getMobTypes()) {
-            File f = new File(dir, type + ".png");
-            if (f.exists() && f.length() > 0) continue;
-
-            String url = getConfig().getString("skins.urls." + type, "");
-            if (url == null || url.isEmpty()) continue;
-
-            try {
-                byte[] bytes = downloadBytes(url, getConfig().getString("skins.userAgent", "IndevMobs/1.2.2"));
-                if (bytes != null && bytes.length > 16 && looksLikePng(bytes)) {
-                    try (FileOutputStream fos = new FileOutputStream(f)) {
-                        fos.write(bytes);
-                    }
-                    getLogger().info("Downloaded missing skin to " + f.getPath());
-                } else {
-                    getLogger().warning("Could not auto-download valid PNG for " + type + " from " + url);
-                }
-            } catch (Throwable ex) {
-                getLogger().warning("Auto-download failed for " + type + ": " + ex.getMessage());
-            }
-        }
     }
 
     private File getSkinDirectory() {
@@ -388,241 +371,11 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     }
 
     // -------------------------------------------------------------------------
-    // Nametag hiding (pseudo-mob feel)
-    // -------------------------------------------------------------------------
-
-    private void setupNametagHidingTeam() {
-        try {
-            if (Bukkit.getScoreboardManager() == null) return;
-            indevScoreboard = Bukkit.getScoreboardManager().getMainScoreboard();
-
-            Team existing = indevScoreboard.getTeam("indevmobs_notags");
-            if (existing == null) {
-                indevNoTagTeam = indevScoreboard.registerNewTeam("indevmobs_notags");
-            } else {
-                indevNoTagTeam = existing;
-            }
-
-            indevNoTagTeam.setOption(Team.Option.NAME_TAG_VISIBILITY, Team.OptionStatus.NEVER);
-            indevNoTagTeam.setOption(Team.Option.COLLISION_RULE, Team.OptionStatus.NEVER);
-        } catch (Throwable ignored) {}
-    }
-
-    private void tryAddToNoTagTeam(Entity entity) {
-        if (!(entity instanceof Player)) return;
-        if (indevNoTagTeam == null) return;
-
-        Player p = (Player) entity;
-        try {
-            indevNoTagTeam.addEntry(p.getName());
-        } catch (Throwable ignored) {}
-    }
-
-    // -------------------------------------------------------------------------
-    // Dynmap init + updater (reflection)
-    // -------------------------------------------------------------------------
-
-    private void initDynmap() {
-        dynmapAvailable = false;
-        dynmapMarkerApi = null;
-        dynmapMarkerSet = null;
-        dynmapPlugin = null;
-
-        if (!getConfig().getBoolean("dynmap.enabled", true)) return;
-
-        dynmapPlugin = Bukkit.getPluginManager().getPlugin("dynmap");
-        dynmapAvailable = (dynmapPlugin != null && dynmapPlugin.isEnabled());
-        if (!dynmapAvailable) return;
-
-        try {
-            // DynmapPlugin.getAPI() -> DynmapAPI
-            Object dynmapApi = safeInvoke(dynmapPlugin, "getAPI");
-            if (dynmapApi == null) {
-                getLogger().warning("Dynmap found but getAPI() returned null.");
-                dynmapAvailable = false;
-                return;
-            }
-
-            Object markerApi = safeInvoke(dynmapApi, "getMarkerAPI");
-            if (markerApi == null) {
-                getLogger().warning("Dynmap MarkerAPI is null (markers may be disabled).");
-                dynmapAvailable = false;
-                return;
-            }
-            dynmapMarkerApi = markerApi;
-
-            String setId = getConfig().getString("dynmap.markerSetId", "npcs");
-            String setLabel = getConfig().getString("dynmap.markerSetLabel", "NPCs");
-
-            Object existingSet = safeInvoke(markerApi, "getMarkerSet",
-                    new Class<?>[]{String.class}, new Object[]{setId});
-            if (existingSet != null) {
-                dynmapMarkerSet = existingSet;
-            } else {
-                dynmapMarkerSet = safeInvoke(markerApi, "createMarkerSet",
-                        new Class<?>[]{String.class, String.class, Set.class, boolean.class},
-                        new Object[]{setId, setLabel, null, true});
-            }
-
-            if (dynmapMarkerSet == null) {
-                getLogger().warning("Dynmap MarkerSet could not be created or retrieved.");
-                dynmapAvailable = false;
-                return;
-            }
-
-            ensureDynmapIconRegistered("rana");
-            ensureDynmapIconRegistered("steve");
-            ensureDynmapIconRegistered("blacksteve");
-            ensureDynmapIconRegistered("beastboy");
-
-            getLogger().info("Dynmap detected: NPCs marker layer active (set id '" + setId + "').");
-        } catch (Throwable ex) {
-            dynmapAvailable = false;
-            getLogger().warning("Dynmap init failed: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
-        }
-    }
-
-    private void startDynmapUpdater() {
-        if (dynmapUpdateTaskId != -1) {
-            Bukkit.getScheduler().cancelTask(dynmapUpdateTaskId);
-            dynmapUpdateTaskId = -1;
-        }
-        if (!dynmapAvailable) return;
-
-        int ticks = Math.max(20, getConfig().getInt("dynmap.updateTicks", 40));
-        dynmapUpdateTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
-            if (!dynmapAvailable || dynmapMarkerApi == null || dynmapMarkerSet == null) return;
-
-            // Cleanup dead markers
-            Iterator<Map.Entry<UUID, Object>> it = dynmapMarkersByEntity.entrySet().iterator();
-            while (it.hasNext()) {
-                Map.Entry<UUID, Object> entry = it.next();
-                Entity entity = Bukkit.getEntity(entry.getKey());
-                if (entity == null || !entity.isValid() || entity.isDead()) {
-                    safeInvoke(entry.getValue(), "deleteMarker");
-                    it.remove();
-                }
-            }
-
-            // Ensure markers exist + update positions
-            for (Map.Entry<UUID, String> entry : spawnedEntities.entrySet()) {
-                UUID uuid = entry.getKey();
-                String mobType = entry.getValue();
-
-                Entity entity = Bukkit.getEntity(uuid);
-                if (entity == null || !entity.isValid() || entity.isDead()) continue;
-
-                Object marker = dynmapMarkersByEntity.get(uuid);
-                if (marker == null) {
-                    marker = createDynmapMarkerFor(entity, mobType);
-                    if (marker != null) dynmapMarkersByEntity.put(uuid, marker);
-                } else {
-                    updateDynmapMarkerLocation(marker, entity.getLocation());
-                }
-            }
-        }, ticks, ticks);
-    }
-
-    private void ensureDynmapIconRegistered(String mobType) {
-        if (!dynmapAvailable || dynmapMarkerApi == null) return;
-
-        String iconId = getConfig().getString("dynmap.icons." + mobType + ".id", "npc_" + mobType);
-        String iconLabel = getConfig().getString("dynmap.icons." + mobType + ".label", mobType);
-        String iconUrl = getConfig().getString("dynmap.icons." + mobType + ".url", "");
-        if (iconUrl == null || iconUrl.isEmpty()) return;
-
-        Object existing = safeInvoke(dynmapMarkerApi, "getMarkerIcon",
-                new Class<?>[]{String.class}, new Object[]{iconId});
-        if (existing != null) return;
-
-        try {
-            File iconDir = new File(getDataFolder(), "dynmap_icons");
-            if (!iconDir.exists()) iconDir.mkdirs();
-
-            File localPng = new File(iconDir, iconId + ".png");
-            if (!localPng.exists() || localPng.length() < 16) {
-                downloadToFile(iconUrl, localPng);
-            }
-
-            try (BufferedInputStream in = new BufferedInputStream(new FileInputStream(localPng))) {
-                safeInvoke(dynmapMarkerApi, "createMarkerIcon",
-                        new Class<?>[]{String.class, String.class, java.io.InputStream.class},
-                        new Object[]{iconId, iconLabel, in});
-            }
-        } catch (Throwable ex) {
-            getLogger().warning("Dynmap icon register failed for " + mobType + ": " + ex.getMessage());
-        }
-    }
-
-    private Object createDynmapMarkerFor(Entity entity, String mobType) {
-        if (!dynmapAvailable || dynmapMarkerSet == null || dynmapMarkerApi == null) return null;
-
-        try {
-            String markerId = "indevmobs_" + entity.getUniqueId();
-            String label = getConfig().getString("mobs." + mobType + ".displayName", mobType);
-            String worldName = entity.getWorld().getName();
-            Location loc = entity.getLocation();
-
-            String iconId = getConfig().getString("dynmap.icons." + mobType + ".id", "npc_" + mobType);
-            Object icon = safeInvoke(dynmapMarkerApi, "getMarkerIcon",
-                    new Class<?>[]{String.class}, new Object[]{iconId});
-            if (icon == null) return null;
-
-            // Dynmap 3.x createMarker signatures vary; try common 9-arg:
-            // createMarker(id, label, markup, world, x,y,z, icon, persistent)
-            for (Method m : dynmapMarkerSet.getClass().getMethods()) {
-                if (!m.getName().equals("createMarker")) continue;
-                if (m.getParameterCount() != 9) continue;
-                return m.invoke(dynmapMarkerSet,
-                        markerId, label, false, worldName,
-                        loc.getX(), loc.getY(), loc.getZ(),
-                        icon, true);
-            }
-
-            return null;
-        } catch (Throwable ex) {
-            getLogger().warning("Dynmap marker create failed: " + ex.getMessage());
-            return null;
-        }
-    }
-
-    private void updateDynmapMarkerLocation(Object marker, Location loc) {
-        if (marker == null || loc == null || loc.getWorld() == null) return;
-        invokeByNameAndArgCount(marker, "setLocation",
-                new Object[]{loc.getWorld().getName(), loc.getX(), loc.getY(), loc.getZ()});
-    }
-
-    private void downloadToFile(String urlStr, File outFile) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection) new URL(urlStr).openConnection();
-        conn.setRequestProperty("User-Agent", "IndevMobs/1.2.2");
-        conn.setConnectTimeout(12000);
-        conn.setReadTimeout(20000);
-
-        int code = conn.getResponseCode();
-        if (code < 200 || code >= 300) {
-            conn.disconnect();
-            throw new Exception("HTTP " + code);
-        }
-
-        try (BufferedInputStream in = new BufferedInputStream(conn.getInputStream());
-             FileOutputStream fos = new FileOutputStream(outFile)) {
-            byte[] buf = new byte[8192];
-            int r;
-            while ((r = in.read(buf)) != -1) fos.write(buf, 0, r);
-        } finally {
-            conn.disconnect();
-        }
-    }
-
-    // -------------------------------------------------------------------------
     // Spawner loop
     // -------------------------------------------------------------------------
 
     private void startSpawner() {
-        if (spawnTaskId != -1) {
-            Bukkit.getScheduler().cancelTask(spawnTaskId);
-            spawnTaskId = -1;
-        }
+        if (spawnTaskId != -1) Bukkit.getScheduler().cancelTask(spawnTaskId);
 
         int intervalTicks = Math.max(20, getConfig().getInt("spawning.tickInterval", 200));
         spawnTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
@@ -647,7 +400,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
                 double spawnChance = clamp01(getConfig().getDouble("spawning.spawnChancePerAttempt", 0.10));
 
                 for (Player player : players) {
-                    for (int attempt = 0; attempt < attemptsPerPlayer; attempt++) {
+                    for (int attemptIndex = 0; attemptIndex < attemptsPerPlayer; attemptIndex++) {
                         if (currentCount >= maxPerWorld) break;
                         if (Math.random() > spawnChance) continue;
 
@@ -670,13 +423,15 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
     private int countAliveInWorld(World world) {
         int count = 0;
-        Iterator<Map.Entry<UUID, String>> it = spawnedEntities.entrySet().iterator();
-        while (it.hasNext()) {
-            Map.Entry<UUID, String> entry = it.next();
+        Iterator<Map.Entry<UUID, String>> iterator = spawnedEntities.entrySet().iterator();
+        while (iterator.hasNext()) {
+            Map.Entry<UUID, String> entry = iterator.next();
             UUID uuid = entry.getKey();
             Entity entity = Bukkit.getEntity(uuid);
             if (entity == null || !entity.isValid() || entity.isDead()) {
-                it.remove();
+                iterator.remove();
+                citizensNpcIdByEntity.remove(uuid);
+                removeDynmapMarker(uuid);
                 continue;
             }
             if (entity.getWorld().equals(world)) count++;
@@ -690,7 +445,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
         int tries = Math.max(5, getConfig().getInt("spawning.locationTries", 12));
 
-        for (int t = 0; t < tries; t++) {
+        for (int tryIndex = 0; tryIndex < tries; tryIndex++) {
             int dx = randomInt(-radius, radius);
             int dz = randomInt(-radius, radius);
 
@@ -728,34 +483,30 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         }
     }
 
-    private List<String> getMobTypes() {
-        return Arrays.asList("rana", "steve", "blacksteve", "beastboy");
-    }
-
     private String pickMobTypeByWeight() {
         ConfigurationSection weights = getConfig().getConfigurationSection("spawning.weights");
         if (weights == null) return "rana";
 
         double total = 0.0;
-        Map<String, Double> w = new HashMap<>();
+        Map<String, Double> weighted = new HashMap<>();
         for (String type : getMobTypes()) {
             double value = Math.max(0.0, weights.getDouble(type, 1.0));
-            w.put(type, value);
+            weighted.put(type, value);
             total += value;
         }
         if (total <= 0.0) return null;
 
         double roll = Math.random() * total;
-        double acc = 0.0;
+        double running = 0.0;
         for (String type : getMobTypes()) {
-            acc += w.getOrDefault(type, 0.0);
-            if (roll <= acc) return type;
+            running += weighted.getOrDefault(type, 0.0);
+            if (roll <= running) return type;
         }
         return "rana";
     }
 
     // -------------------------------------------------------------------------
-    // Citizens spawning (reflection)
+    // Citizens spawn + setup
     // -------------------------------------------------------------------------
 
     private boolean spawnIndevNpc(String mobType, Location spawnLoc) {
@@ -763,201 +514,423 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
         SkinData skin = ensureSkinLoaded(mobType);
         if (skin == null || skin.value.isEmpty() || skin.signature.isEmpty()) {
+            getLogger().warning("Skin not ready for " + mobType + " (value/signature missing).");
             return false;
         }
 
-        String displayName = getConfig().getString("mobs." + mobType + ".displayName", mobType);
+        String rawProfile = getConfig().getString("mobs." + mobType + ".profileName", "Indev" + mobType);
+        String profileName = toValidUsername(rawProfile);
 
         try {
-            // CitizensAPI.getNPCRegistry()
-            Class<?> citizensApiClass = Class.forName("net.citizensnpcs.api.CitizensAPI");
-            Object registry = citizensApiClass.getMethod("getNPCRegistry").invoke(null);
+            NPCRegistry registry = CitizensAPI.getNPCRegistry();
             if (registry == null) {
-                getLogger().warning("CitizensAPI.getNPCRegistry() returned null.");
+                getLogger().warning("Citizens NPC registry is null.");
                 return false;
             }
 
-            Object npc = registry.getClass()
-                    .getMethod("createNPC", org.bukkit.entity.EntityType.class, String.class)
-                    .invoke(registry, org.bukkit.entity.EntityType.PLAYER, displayName);
+            NPC npc = registry.createNPC(EntityType.PLAYER, profileName);
 
-            // Disable Citizens protection if method exists
-            try {
-                Method setProtectedMethod = npc.getClass().getMethod("setProtected", boolean.class);
-                setProtectedMethod.invoke(npc, false);
-            } catch (Throwable ignored) {}
+            // Make it damageable and "mob-like"
+            npc.setProtected(false);
 
-            boolean spawned = (boolean) npc.getClass().getMethod("spawn", Location.class).invoke(npc, spawnLoc);
-            if (!spawned) return false;
+            // Mark as ours (Citizens persistent tags for restart safety)
+            try { npc.data().setPersistent(CIT_KEY_INDEVMOBS, true); } catch (Throwable ignored) {}
+            try { npc.data().setPersistent(CIT_KEY_TYPE, mobType.toLowerCase(Locale.ROOT)); } catch (Throwable ignored) {}
 
-            Entity entity = (Entity) npc.getClass().getMethod("getEntity").invoke(npc);
+            // Hide nameplate (no scoreboard packet hacks)
+            npc.data().setPersistent(NPC.Metadata.NAMEPLATE_VISIBLE, false);
+
+            // Spawn
+            boolean ok = npc.spawn(spawnLoc);
+            if (!ok) return false;
+
+            Entity entity = npc.getEntity();
             if (entity == null) return false;
 
-            // Clear Bukkit invulnerable flag
-            try { entity.setInvulnerable(false); } catch (Throwable ignored) {}
-
-            // Tag entity and hide its nametag (pseudo-mob)
+            // Tag as indevmob
             tagEntity(entity, mobType);
-            tryAddToNoTagTeam(entity);
+            spawnedEntities.put(entity.getUniqueId(), mobType);
+            citizensNpcIdByEntity.put(entity.getUniqueId(), npc.getId());
 
-            // Also try to avoid showing a "custom name"
-            // (for Player entities, custom name can be odd; keep it unset)
-            try { entity.setCustomNameVisible(false); } catch (Throwable ignored) {}
-
-            // Health (compat): reflection setMaxHealth/setHealth if present
+            // Health (player-like)
             try {
-                double maxHealth = Math.max(1.0, getConfig().getDouble("mobs." + mobType + ".maxHealth", 20.0));
-                try { entity.getClass().getMethod("setMaxHealth", double.class).invoke(entity, maxHealth); }
-                catch (Throwable ignored) {}
-                try { entity.getClass().getMethod("setHealth", double.class).invoke(entity, maxHealth); }
-                catch (Throwable ignored) {}
+                double maxHealth = getConfig().getDouble("mobs." + mobType + ".maxHealth", 20.0);
+                if (entity instanceof org.bukkit.entity.LivingEntity livingEntity) {
+                    org.bukkit.attribute.Attribute attr = org.bukkit.attribute.Attribute.MAX_HEALTH;
+                    var inst = livingEntity.getAttribute(attr);
+                    if (inst != null) inst.setBaseValue(maxHealth);
+                    livingEntity.setHealth(Math.min(livingEntity.getHealth(), maxHealth));
+                }
             } catch (Throwable ignored) {}
 
             // Apply skin
-            applyCitizensSkinTrait(npc, displayName, skin.signature, skin.value);
+            applyNpcSkin(npc, profileName, skin);
 
-            // Enable Citizens wander (this is what makes them actually walk reliably)
-            enableCitizensWanderTrait(npc, mobType);
+            // Re-apply skin + nameplate after a short delay (client reliability)
+            Bukkit.getScheduler().runTaskLater(this, () -> {
+                try {
+                    NPC again = getNpcByEntityUuid(entity.getUniqueId());
+                    if (again != null) {
+                        again.data().setPersistent(NPC.Metadata.NAMEPLATE_VISIBLE, false);
+                        applyNpcSkin(again, profileName, skin);
+                    }
+                } catch (Throwable ignored2) {}
+            }, 10L);
 
-            // Track
-            spawnedEntities.put(entity.getUniqueId(), mobType);
-
-            // Create dynmap marker immediately if available
-            if (dynmapAvailable) {
-                Object marker = createDynmapMarkerFor(entity, mobType);
-                if (marker != null) dynmapMarkersByEntity.put(entity.getUniqueId(), marker);
-            }
+            // Create/update dynmap marker
+            updateDynmapMarker(entity.getUniqueId());
 
             return true;
-
         } catch (Throwable ex) {
             getLogger().warning("Spawn failed via Citizens: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
             return false;
         }
     }
 
-    private void applyCitizensSkinTrait(Object npc, String skinName, String signature, String value) {
+    private void applyNpcSkin(NPC npc, String skinName, SkinData skin) {
         try {
-            Class<?> skinTraitClass = Class.forName("net.citizensnpcs.trait.SkinTrait");
-            Object skinTrait = npc.getClass().getMethod("getOrAddTrait", Class.class).invoke(npc, skinTraitClass);
-
-            skinTrait.getClass().getMethod("setSkinPersistent", String.class, String.class, String.class)
-                    .invoke(skinTrait, skinName, signature, value);
+            SkinTrait trait = npc.getOrAddTrait(SkinTrait.class);
+            trait.setSkinPersistent(skinName, skin.signature, skin.value);
         } catch (Throwable ex) {
-            getLogger().warning("Could not apply Citizens SkinTrait (may appear default): " + ex.getMessage());
+            getLogger().warning("Failed to apply SkinTrait: " + ex.getMessage());
         }
     }
 
-    // Citizens-native wandering (Waypoints wander provider first; fallback to older WanderTrait)
-    private void enableCitizensWanderTrait(Object npc, String mobType) {
-        int radius = Math.max(4, getConfig().getInt("mobs." + mobType + ".wander.radiusBlocks", 16));
-
-        // Attempt 1: Waypoints + WanderWaypointProvider
+    private NPC getNpcByEntityUuid(UUID uuid) {
+        Integer npcId = citizensNpcIdByEntity.get(uuid);
+        if (npcId == null) return null;
         try {
-            Class<?> waypointsTraitClass = Class.forName("net.citizensnpcs.trait.waypoint.Waypoints");
-            Object waypointsTrait = npc.getClass().getMethod("getOrAddTrait", Class.class).invoke(npc, waypointsTraitClass);
+            return CitizensAPI.getNPCRegistry().getById(npcId);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
 
-            Class<?> wanderProviderClass = Class.forName("net.citizensnpcs.trait.waypoint.WanderWaypointProvider");
-            Object wanderProvider = wanderProviderClass.getConstructor().newInstance();
 
-            // Try to set range/radius depending on build
-            try {
-                wanderProviderClass.getMethod("setRange", int.class).invoke(wanderProvider, radius);
-            } catch (Throwable ignored) {
-                try {
-                    wanderProviderClass.getMethod("range", int.class).invoke(wanderProvider, radius);
-                } catch (Throwable ignored2) {}
+    // -------------------------------------------------------------------------
+    // Chunk "re-awakening" + adoption (restart / legacy compatibility)
+    // -------------------------------------------------------------------------
+
+    @EventHandler(ignoreCancelled = true)
+    public void onChunkLoad(ChunkLoadEvent event) {
+        if (!citizensAvailable) return;
+        // Delay 1 tick to let Citizens finish attaching NPCs to entities in this chunk
+        Bukkit.getScheduler().runTaskLater(this, () -> adoptNpcsInChunk(event.getChunk()), 1L);
+    }
+
+    private void scheduleAdoptPass() {
+        if (!citizensAvailable) return;
+        if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
+
+        // Run once shortly after enable, and again a few seconds later
+        adoptTaskId = Bukkit.getScheduler().scheduleSyncDelayedTask(this, this::adoptAllSpawnedNpcs, 40L);
+        Bukkit.getScheduler().runTaskLater(this, this::adoptAllSpawnedNpcs, 220L);
+    }
+
+    private void adoptAllSpawnedNpcs() {
+        if (!citizensAvailable) return;
+
+        NPCRegistry registry;
+        try { registry = CitizensAPI.getNPCRegistry(); } catch (Throwable t) { return; }
+        if (registry == null) return;
+
+        try {
+            for (NPC npc : registry) {
+                if (npc == null) continue;
+                if (!npc.isSpawned()) continue;
+                Entity entity = npc.getEntity();
+                if (entity == null) continue;
+                String mobType = resolveMobTypeForNpc(npc);
+                if (mobType == null) continue;
+                adoptNpc(npc, entity, mobType);
             }
+        } catch (Throwable ignored) {}
+    }
 
-            // Set provider (type varies across builds)
+    private void adoptNpcsInChunk(Chunk chunk) {
+        if (!citizensAvailable) return;
+
+        // Fast path: scan entities in the chunk, then ask Citizens which NPC owns them
+        try {
+            for (Entity entity : chunk.getEntities()) {
+                if (entity == null) continue;
+
+                NPC npc = getNpcForEntity(entity);
+                if (npc == null) continue;
+                if (!npc.isSpawned()) continue;
+
+                String mobType = resolveMobTypeForNpc(npc);
+                if (mobType == null) continue;
+
+                adoptNpc(npc, entity, mobType);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    private NPC getNpcForEntity(Entity entity) {
+        try {
+            NPCRegistry registry = CitizensAPI.getNPCRegistry();
+            if (registry == null) return null;
+
+            // Prefer direct method if present
             try {
-                Class<?> providerIface = Class.forName("net.citizensnpcs.trait.waypoint.WaypointProvider");
-                waypointsTrait.getClass().getMethod("setProvider", providerIface).invoke(waypointsTrait, wanderProvider);
-            } catch (Throwable ignored) {
-                for (Method m : waypointsTrait.getClass().getMethods()) {
-                    if (!m.getName().equals("setProvider")) continue;
-                    if (m.getParameterCount() != 1) continue;
-                    try {
-                        m.invoke(waypointsTrait, wanderProvider);
-                        break;
-                    } catch (Throwable ignored2) {}
+                java.lang.reflect.Method m = registry.getClass().getMethod("getNPC", Entity.class);
+                Object result = m.invoke(registry, entity);
+                return (result instanceof NPC) ? (NPC) result : null;
+            } catch (NoSuchMethodException ignored) {
+                // fallback: try CitizensAPI.getNPCRegistry().getById via our map only
+                return null;
+            }
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private String resolveMobTypeForNpc(NPC npc) {
+        // 1) Persistent tag (new versions)
+        try {
+            Object marker = npc.data().get(CIT_KEY_INDEVMOBS);
+            if (marker instanceof Boolean && ((Boolean) marker)) {
+                Object t = npc.data().get(CIT_KEY_TYPE);
+                if (t != null) {
+                    String mobType = String.valueOf(t).toLowerCase(Locale.ROOT).trim();
+                    if (isKnownMobType(mobType)) return mobType;
                 }
             }
-
-            // Unpause if supported
-            try {
-                waypointsTrait.getClass().getMethod("setPaused", boolean.class).invoke(waypointsTrait, false);
-            } catch (Throwable ignored) {}
-
-            return; // success
         } catch (Throwable ignored) {}
 
-        // Attempt 2: Older WanderTrait
+        // 2) Legacy compatibility: infer from NPC name
         try {
-            Class<?> wanderTraitClass = Class.forName("net.citizensnpcs.trait.WanderTrait");
-            Object wanderTrait = npc.getClass().getMethod("getOrAddTrait", Class.class).invoke(npc, wanderTraitClass);
+            String name = npc.getName();
+            if (name != null) {
+                String inferred = inferMobTypeFromName(name);
+                if (inferred != null) return inferred;
+            }
+        } catch (Throwable ignored) {}
 
-            try { wanderTrait.getClass().getMethod("setRadius", int.class).invoke(wanderTrait, radius); } catch (Throwable ignored2) {}
-            try { wanderTrait.getClass().getMethod("setActive", boolean.class).invoke(wanderTrait, true); } catch (Throwable ignored2) {}
-            try { wanderTrait.getClass().getMethod("setWandering", boolean.class).invoke(wanderTrait, true); } catch (Throwable ignored2) {}
+        return null;
+    }
+
+    private boolean isKnownMobType(String mobTypeLower) {
+        for (String t : getMobTypes()) {
+            if (t.equalsIgnoreCase(mobTypeLower)) return true;
+        }
+        return false;
+    }
+
+    private String inferMobTypeFromName(String npcName) {
+        String n = npcName.toLowerCase(Locale.ROOT).trim();
+        if (n.contains("rana")) return "rana";
+        if (n.contains("blacksteve") || n.contains("black_steve") || n.contains("black steve")) return "blacksteve";
+        if (n.contains("beastboy") || n.contains("beast_boy") || n.contains("beast boy")) return "beastboy";
+        if (n.equals("steve") || n.contains("dock-steve") || n.contains("dock steve") || n.contains("indevsteve")) return "steve";
+        // also accept our default profile names
+        if (n.contains("indevrana")) return "rana";
+        if (n.contains("indevblacksteve")) return "blacksteve";
+        if (n.contains("indevbeastboy")) return "beastboy";
+        if (n.contains("indevsteve")) return "steve";
+        return null;
+    }
+
+    private void adoptNpc(NPC npc, Entity entity, String mobType) {
+        // Persist tags
+        try { npc.data().setPersistent(CIT_KEY_INDEVMOBS, true); } catch (Throwable ignored) {}
+        try { npc.data().setPersistent(CIT_KEY_TYPE, mobType.toLowerCase(Locale.ROOT)); } catch (Throwable ignored) {}
+
+        // Hide nameplate (and also on the Bukkit side)
+        try { npc.data().setPersistent(NPC.Metadata.NAMEPLATE_VISIBLE, false); } catch (Throwable ignored) {}
+        try {
+            entity.setCustomNameVisible(false);
+        } catch (Throwable ignored) {}
+
+        // Tag entity PDC so we can quickly recognize it later
+        tagEntity(entity, mobType);
+
+        // Track for our loops
+        spawnedEntities.put(entity.getUniqueId(), mobType);
+        citizensNpcIdByEntity.put(entity.getUniqueId(), npc.getId());
+
+        // Ensure skin is applied (best effort; safe if already applied)
+        try {
+            SkinData skin = ensureSkinLoaded(mobType);
+            if (skin != null) {
+                String profileName = getConfig().getString("mobs." + mobType + ".profileName", "Indev" + mobType);
+                if (profileName == null || profileName.trim().isEmpty()) profileName = "Indev" + mobType;
+                applyNpcSkin(npc, profileName, skin);
+            }
+        } catch (Throwable ignored) {}
+
+        // Dynmap marker
+        updateDynmapMarker(entity.getUniqueId());
+    }
+
+    private void startEnforceLoop() {
+        if (enforceTaskId != -1) Bukkit.getScheduler().cancelTask(enforceTaskId);
+        if (!citizensAvailable) return;
+
+        int tickPeriod = Math.max(20, getConfig().getInt("nametag.enforceTickPeriod", 40));
+
+        enforceTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            for (Map.Entry<UUID, String> entry : spawnedEntities.entrySet()) {
+                UUID uuid = entry.getKey();
+                Entity entity = Bukkit.getEntity(uuid);
+                if (entity == null || !entity.isValid() || entity.isDead()) continue;
+
+                NPC npc = getNpcByEntityUuid(uuid);
+                if (npc != null) {
+                    try { npc.data().setPersistent(NPC.Metadata.NAMEPLATE_VISIBLE, false); } catch (Throwable ignored) {}
+                }
+                try { entity.setCustomNameVisible(false); } catch (Throwable ignored) {}
+
+                // Keep pitch reasonable (prevents “looking down”)
+                try {
+                    Location loc = entity.getLocation();
+                    if (Math.abs(loc.getPitch()) > 15.0f) {
+                        loc.setPitch(0.0f);
+                        entity.teleport(loc);
+                    }
+                } catch (Throwable ignored) {}
+            }
+        }, tickPeriod, tickPeriod);
+    }
+
+    private void trySuppressAdventureDeathMessage(PlayerDeathEvent event) {
+        // Paper/Adventure compatibility (safe on Spigot; method will not exist)
+        try {
+            Method m = event.getClass().getMethod("deathMessage", Class.forName("net.kyori.adventure.text.Component"));
+            m.invoke(event, new Object[] { null });
         } catch (Throwable ignored) {}
     }
 
-    private void tagEntity(Entity entity, String mobType) {
+    private void tryRemovePlayerHeads(List<ItemStack> drops) {
+        if (drops == null) return;
         try {
-            entity.getPersistentDataContainer().set(indevMobKey, PersistentDataType.BYTE, (byte) 1);
-            entity.getPersistentDataContainer().set(indevMobTypeKey, PersistentDataType.STRING, mobType.toLowerCase(Locale.ROOT));
+            drops.removeIf(item -> item != null && item.getType().name().toLowerCase(Locale.ROOT).contains("player_head"));
         } catch (Throwable ignored) {}
     }
 
-    private String getTaggedMobType(Entity entity) {
-        try {
-            Byte present = entity.getPersistentDataContainer().get(indevMobKey, PersistentDataType.BYTE);
-            if (present == null || present != (byte) 1) return null;
-            return entity.getPersistentDataContainer().get(indevMobTypeKey, PersistentDataType.STRING);
-        } catch (Throwable ignored) {}
+
+    // -------------------------------------------------------------------------
+    // Wandering (Citizens Navigator)
+    // -------------------------------------------------------------------------
+
+    private void startWanderLoop() {
+        if (wanderTaskId != -1) Bukkit.getScheduler().cancelTask(wanderTaskId);
+        if (!citizensAvailable) return;
+        if (!getConfig().getBoolean("wander.enabled", true)) return;
+
+        int tickPeriod = Math.max(10, getConfig().getInt("wander.tickPeriod", 40));
+        double retargetChance = clamp01(getConfig().getDouble("wander.targetChanceWhenIdle", 0.50));
+        int verticalSearch = Math.max(1, getConfig().getInt("wander.verticalSearch", 3));
+
+        wanderTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            Iterator<Map.Entry<UUID, String>> iterator = spawnedEntities.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<UUID, String> entry = iterator.next();
+                UUID uuid = entry.getKey();
+                String mobType = entry.getValue();
+
+                Entity entity = Bukkit.getEntity(uuid);
+                if (entity == null || !entity.isValid() || entity.isDead()) {
+                    iterator.remove();
+                    citizensNpcIdByEntity.remove(uuid);
+                    removeDynmapMarker(uuid);
+                    continue;
+                }
+
+                NPC npc = getNpcByEntityUuid(uuid);
+                if (npc == null || !npc.isSpawned()) continue;
+
+                Navigator navigator = npc.getNavigator();
+                if (navigator == null) continue;
+
+                if (navigator.isNavigating()) continue;
+                if (Math.random() > retargetChance) continue;
+
+                int radius = Math.max(4, getConfig().getInt("mobs." + mobType + ".wander.radiusBlocks", 16));
+                double speed = Math.max(0.1, getConfig().getDouble("mobs." + mobType + ".wander.speed", 1.0));
+
+                Location from = entity.getLocation();
+                Location target = pickWanderTarget(from, radius, verticalSearch);
+                if (target == null) continue;
+
+                try {
+                    // Speed modifier is on local parameters
+                    navigator.getLocalParameters().speedModifier((float) speed);
+                } catch (Throwable ignored) {}
+
+                try {
+                    Location face = entity.getLocation();
+                    face.setDirection(target.toVector().subtract(face.toVector()));
+                    face.setPitch(0.0f);
+                    entity.teleport(face);
+                } catch (Throwable ignored2) {}
+
+                navigator.setTarget(target);
+            }
+        }, tickPeriod, tickPeriod);
+    }
+
+    private Location pickWanderTarget(Location from, int radius, int verticalSearch) {
+        World world = from.getWorld();
+        if (world == null) return null;
+
+        for (int i = 0; i < 10; i++) {
+            int dx = randomInt(-radius, radius);
+            int dz = randomInt(-radius, radius);
+
+            int x = from.getBlockX() + dx;
+            int z = from.getBlockZ() + dz;
+
+            int yTop = world.getHighestBlockYAt(x, z);
+
+            for (int dy = -verticalSearch; dy <= verticalSearch; dy++) {
+                int y = yTop + dy;
+                if (y <= world.getMinHeight() + 1 || y >= world.getMaxHeight() - 2) continue;
+
+                Location feet = new Location(world, x + 0.5, y, z + 0.5);
+                if (!feet.getBlock().getType().isAir()) continue;
+                if (!feet.clone().add(0, 1, 0).getBlock().getType().isAir()) continue;
+                if (feet.clone().add(0, -1, 0).getBlock().isLiquid()) continue;
+
+                return feet;
+            }
+        }
         return null;
     }
 
     // -------------------------------------------------------------------------
-    // Damage & drops + suppress player obituary
+    // Death message suppression + drops + hurt sound
     // -------------------------------------------------------------------------
 
-    // Citizens often cancels damage for NPCs. We force-apply it here.
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
-    public void onIndevMobDamageWorkaround(EntityDamageEvent event) {
+    public void onIndevNpcPlayerDeath(PlayerDeathEvent event) {
         String mobType = getTaggedMobType(event.getEntity());
         if (mobType == null) return;
 
-        if (!(event.getEntity() instanceof org.bukkit.entity.LivingEntity living)) return;
-
-        double damage = event.getFinalDamage();
-        if (damage <= 0) return;
-
-        // We handle it manually so Citizens protection doesn't matter
-        event.setCancelled(true);
-
-        float volume = (float) getConfig().getDouble("sounds.hurt.volume", 1.0);
-        float pitch = (float) getConfig().getDouble("sounds.hurt.pitch", 1.0);
-        living.getWorld().playSound(living.getLocation(), Sound.ENTITY_PLAYER_HURT, volume, pitch);
-
-        double newHealth = living.getHealth() - damage;
-        if (newHealth <= 0.0) {
-            living.setHealth(0.0); // triggers death
-        } else {
-            living.setHealth(newHealth);
-        }
-    }
-
-    // Clear obituary chat message for NPC "players"
-    @EventHandler(priority = EventPriority.HIGHEST)
-    public void onIndevNpcDeathMessage(PlayerDeathEvent event) {
-        String mobType = getTaggedMobType(event.getEntity());
-        if (mobType == null) return;
-
+        // Suppress obituary
         event.setDeathMessage(null);
+        trySuppressAdventureDeathMessage(event);
+
+        // Override drops (Citizens NPCs are players)
+        try { event.getDrops().clear(); } catch (Throwable ignored) {}
+        try {
+            List<ItemStack> drops = buildDropsFor(mobType);
+            for (ItemStack item : drops) {
+                if (item == null) continue;
+                event.getDrops().add(item);
+            }
+        } catch (Throwable ignored) {}
+
+        // Strip player-head drops injected by other plugins (best effort)
+        tryRemovePlayerHeads(event.getDrops());
+
         event.setDroppedExp(0);
+
+        // Remove dynmap marker immediately
+        removeDynmapMarker(event.getEntity().getUniqueId());
     }
+
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onEntityDeath(EntityDeathEvent event) {
@@ -967,8 +940,19 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         event.getDrops().clear();
         event.getDrops().addAll(buildDropsFor(mobType));
 
-        Object marker = dynmapMarkersByEntity.remove(event.getEntity().getUniqueId());
-        if (marker != null) safeInvoke(marker, "deleteMarker");
+        // Remove dynmap marker immediately
+        removeDynmapMarker(event.getEntity().getUniqueId());
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onIndevMobHurtSound(EntityDamageEvent event) {
+        String mobType = getTaggedMobType(event.getEntity());
+        if (mobType == null) return;
+        if (!(event.getEntity() instanceof org.bukkit.entity.LivingEntity living)) return;
+
+        float volume = (float) getConfig().getDouble("sounds.hurt.volume", 1.0);
+        float pitch = (float) getConfig().getDouble("sounds.hurt.pitch", 1.0);
+        living.getWorld().playSound(living.getLocation(), Sound.ENTITY_PLAYER_HURT, volume, pitch);
     }
 
     private List<ItemStack> buildDropsFor(String mobType) {
@@ -1019,7 +1003,27 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     }
 
     // -------------------------------------------------------------------------
-    // MineSkin: local file upload + caching to config
+    // PDC helpers
+    // -------------------------------------------------------------------------
+
+    private void tagEntity(Entity entity, String mobType) {
+        try {
+            entity.getPersistentDataContainer().set(indevMobKey, PersistentDataType.BYTE, (byte) 1);
+            entity.getPersistentDataContainer().set(indevMobTypeKey, PersistentDataType.STRING, mobType.toLowerCase(Locale.ROOT));
+        } catch (Throwable ignored) {}
+    }
+
+    private String getTaggedMobType(Entity entity) {
+        try {
+            Byte present = entity.getPersistentDataContainer().get(indevMobKey, PersistentDataType.BYTE);
+            if (present == null || present != (byte) 1) return null;
+            return entity.getPersistentDataContainer().get(indevMobTypeKey, PersistentDataType.STRING);
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    // -------------------------------------------------------------------------
+    // MineSkin local upload + caching
     // -------------------------------------------------------------------------
 
     private void loadSkinCacheFromConfig() {
@@ -1046,38 +1050,22 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         if (!allow) return null;
 
         String apiKey = getConfig().getString("skins.mineskinApiKey", "");
-        String userAgent = getConfig().getString("skins.userAgent", "IndevMobs/1.2.2");
+        String userAgent = getConfig().getString("skins.userAgent", "IndevMobs/1.4");
         String variant = getConfig().getString("skins.variant", "classic");
         String visibility = getConfig().getString("skins.visibility", "unlisted");
 
-        byte[] pngBytes = null;
-
-        boolean useLocal = getConfig().getBoolean("skins.useLocalFiles", true);
-        if (useLocal) {
-            File f = new File(getSkinDirectory(), mobType + ".png");
-            if (f.exists() && f.length() > 0) {
-                try {
-                    pngBytes = readFileBytes(f);
-                } catch (Throwable ex) {
-                    getLogger().warning("Failed reading local skin file for " + mobType + ": " + ex.getMessage());
-                }
-            } else {
-                getLogger().warning("Missing local skin file: " + f.getPath());
-            }
+        File skinFile = new File(getSkinDirectory(), mobType + ".png");
+        if (!skinFile.exists() || skinFile.length() <= 0) {
+            getLogger().warning("Missing local skin file: " + skinFile.getPath());
+            return null;
         }
 
-        // Optional fallback: download to memory (if URL set)
-        if (pngBytes == null) {
-            String url = getConfig().getString("skins.urls." + mobType, "");
-            if (url != null && !url.isEmpty()) {
-                pngBytes = downloadBytes(url, userAgent);
-                if (pngBytes == null || pngBytes.length < 16) {
-                    getLogger().warning("Could not download fallback skin for " + mobType + " from " + url);
-                    return null;
-                }
-            } else {
-                return null;
-            }
+        byte[] pngBytes;
+        try {
+            pngBytes = readFileBytes(skinFile);
+        } catch (Throwable ex) {
+            getLogger().warning("Failed reading local skin file for " + mobType + ": " + ex.getMessage());
+            return null;
         }
 
         if (!looksLikePng(pngBytes)) {
@@ -1132,9 +1120,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             int code = conn.getResponseCode();
             String body = readAll((code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream());
 
-            long delayMs = parseRateLimitDelayMillis(body);
-            if (delayMs > 0) safeSleep(delayMs);
-
             if (code < 200 || code >= 300) {
                 getLogger().warning("MineSkin upload failed (" + code + "): " + body);
                 return null;
@@ -1148,7 +1133,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             }
 
             return new SkinData(value, signature);
-
         } catch (Throwable ex) {
             getLogger().warning("MineSkin upload error: " + ex.getMessage());
             return null;
@@ -1189,36 +1173,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         }
     }
 
-    private byte[] downloadBytes(String urlStr, String userAgent) {
-        HttpURLConnection conn = null;
-        try {
-            conn = (HttpURLConnection) new URL(urlStr).openConnection();
-            conn.setRequestProperty("User-Agent", userAgent);
-            conn.setInstanceFollowRedirects(true);
-            conn.setConnectTimeout(12000);
-            conn.setReadTimeout(30000);
-
-            int code = conn.getResponseCode();
-            if (code < 200 || code >= 300) {
-                getLogger().warning("Download failed (HTTP " + code + ") for " + urlStr);
-                return null;
-            }
-
-            try (BufferedInputStream in = new BufferedInputStream(conn.getInputStream());
-                 ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
-                byte[] buf = new byte[8192];
-                int r;
-                while ((r = in.read(buf)) != -1) baos.write(buf, 0, r);
-                return baos.toByteArray();
-            }
-        } catch (Throwable ex) {
-            getLogger().warning("Download error for " + urlStr + ": " + ex.getMessage());
-            return null;
-        } finally {
-            if (conn != null) conn.disconnect();
-        }
-    }
-
     private boolean looksLikePng(byte[] data) {
         if (data == null || data.length < 8) return false;
         return (data[0] == (byte) 0x89 &&
@@ -1231,7 +1185,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
                 data[7] == (byte) 0x0A);
     }
 
-    private String readAll(java.io.InputStream in) throws Exception {
+    private String readAll(InputStream in) throws Exception {
         if (in == null) return "";
         try (BufferedReader br = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8))) {
             StringBuilder sb = new StringBuilder();
@@ -1239,23 +1193,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             while ((line = br.readLine()) != null) sb.append(line);
             return sb.toString();
         }
-    }
-
-    private long parseRateLimitDelayMillis(String body) {
-        if (body == null) return 0;
-        int idx = body.indexOf("\"delay\":{\"millis\":");
-        if (idx < 0) return 0;
-        idx += "\"delay\":{\"millis\":".length();
-        int end = idx;
-        while (end < body.length() && Character.isDigit(body.charAt(end))) end++;
-        try { return Long.parseLong(body.substring(idx, end)); }
-        catch (Throwable ignored) { return 0; }
-    }
-
-    private void safeSleep(long millis) {
-        if (millis <= 0) return;
-        try { Thread.sleep(Math.min(millis, 5000)); }
-        catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
     }
 
     private String extractJsonString(String json, String marker) {
@@ -1292,33 +1229,129 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     }
 
     // -------------------------------------------------------------------------
-    // Reflection helpers
+    // Dynmap markers (reflection)
     // -------------------------------------------------------------------------
 
-    private Object safeInvoke(Object target, String methodName) {
-        try { return target.getClass().getMethod(methodName).invoke(target); }
-        catch (Throwable ignored) { return null; }
-    }
+    private void initDynmap() {
+        dynmapAvailable = false;
+        dynmapPlugin = null;
+        dynmapApi = null;
+        dynmapMarkerApi = null;
+        dynmapMarkerSet = null;
 
-    private Object safeInvoke(Object target, String methodName, Class<?>[] paramTypes, Object[] args) {
-        try { return target.getClass().getMethod(methodName, paramTypes).invoke(target, args); }
-        catch (Throwable ignored) { return null; }
-    }
+        if (!getConfig().getBoolean("dynmap.enabled", true)) return;
 
-    private Object invokeByNameAndArgCount(Object target, String methodName, Object[] args) {
+        dynmapPlugin = Bukkit.getPluginManager().getPlugin("dynmap");
+        if (dynmapPlugin == null || !dynmapPlugin.isEnabled()) return;
+
         try {
-            for (Method m : target.getClass().getMethods()) {
-                if (!m.getName().equals(methodName)) continue;
-                if (m.getParameterCount() != args.length) continue;
-                try { return m.invoke(target, args); }
-                catch (Throwable ignored) {}
+            // dynmap plugin exposes getAPI()
+            Method getApi = dynmapPlugin.getClass().getMethod("getAPI");
+            dynmapApi = getApi.invoke(dynmapPlugin);
+            if (dynmapApi == null) return;
+
+            Method getMarkerApi = dynmapApi.getClass().getMethod("getMarkerAPI");
+            dynmapMarkerApi = getMarkerApi.invoke(dynmapApi);
+            if (dynmapMarkerApi == null) return;
+
+            String setId = getConfig().getString("dynmap.markerSetId", "npcs");
+            String setLabel = getConfig().getString("dynmap.markerSetLabel", "NPCs");
+
+            // MarkerSet set = markerApi.getMarkerSet(id); if null createMarkerSet(id,label,null,false)
+            Object markerSet = dynmapMarkerApi.getClass().getMethod("getMarkerSet", String.class).invoke(dynmapMarkerApi, setId);
+            if (markerSet == null) {
+                markerSet = dynmapMarkerApi.getClass()
+                        .getMethod("createMarkerSet", String.class, String.class, Set.class, boolean.class)
+                        .invoke(dynmapMarkerApi, setId, setLabel, null, false);
             }
+            dynmapMarkerSet = markerSet;
+
+            dynmapAvailable = (dynmapMarkerSet != null);
+            if (dynmapAvailable) getLogger().info("Dynmap detected: NPCs marker layer active (set id '" + setId + "').");
+        } catch (Throwable ex) {
+            dynmapAvailable = false;
+            dynmapMarkerApi = null;
+            dynmapMarkerSet = null;
+            getLogger().warning("Dynmap hook failed: " + ex.getClass().getSimpleName() + ": " + ex.getMessage());
+        }
+    }
+
+    private void startDynmapUpdater() {
+        if (dynmapTaskId != -1) Bukkit.getScheduler().cancelTask(dynmapTaskId);
+        if (enforceTaskId != -1) Bukkit.getScheduler().cancelTask(enforceTaskId);
+        if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
+        dynmapTaskId = -1;
+        enforceTaskId = -1;
+        adoptTaskId = -1;
+        if (!dynmapAvailable) return;
+
+        int ticks = Math.max(20, getConfig().getInt("dynmap.updateTicks", 40));
+        dynmapTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            // update all markers
+            for (UUID uuid : new ArrayList<>(spawnedEntities.keySet())) {
+                updateDynmapMarker(uuid);
+            }
+        }, ticks, ticks);
+    }
+
+    private void updateDynmapMarker(UUID entityUuid) {
+        if (!dynmapAvailable || dynmapMarkerSet == null) return;
+
+        Entity entity = Bukkit.getEntity(entityUuid);
+        if (entity == null || !entity.isValid() || entity.isDead()) {
+            removeDynmapMarker(entityUuid);
+            return;
+        }
+
+        String mobType = spawnedEntities.get(entityUuid);
+        if (mobType == null) return;
+
+        try {
+            String markerId = "indevmob_" + entityUuid;
+            String label = getConfig().getString("mobs." + mobType + ".displayName", mobType);
+
+            String iconId = getConfig().getString("dynmap.icons." + mobType, "default");
+            Object icon = dynmapMarkerApi.getClass().getMethod("getMarkerIcon", String.class).invoke(dynmapMarkerApi, iconId);
+            if (icon == null) {
+                // fallback to builtin icon if your custom icon id doesn't exist
+                icon = dynmapMarkerApi.getClass().getMethod("getMarkerIcon", String.class).invoke(dynmapMarkerApi, "sign");
+            }
+
+            Object marker = dynmapMarkerByEntity.get(entityUuid);
+
+            if (marker == null) {
+                // Marker createMarker(id,label,world,x,y,z,icon,markup)
+                marker = dynmapMarkerSet.getClass()
+                        .getMethod("createMarker", String.class, String.class, String.class, double.class, double.class, double.class, icon.getClass(), boolean.class)
+                        .invoke(dynmapMarkerSet, markerId, label, entity.getWorld().getName(),
+                                entity.getLocation().getX(), entity.getLocation().getY(), entity.getLocation().getZ(),
+                                icon, false);
+
+                if (marker != null) {
+                    dynmapMarkerByEntity.put(entityUuid, marker);
+                }
+            } else {
+                // setLocation(world,x,y,z)
+                marker.getClass()
+                        .getMethod("setLocation", String.class, double.class, double.class, double.class)
+                        .invoke(marker, entity.getWorld().getName(),
+                                entity.getLocation().getX(), entity.getLocation().getY(), entity.getLocation().getZ());
+            }
+        } catch (Throwable ignored) {
+            // Keep quiet; dynmap API has some signature drift between builds.
+        }
+    }
+
+    private void removeDynmapMarker(UUID entityUuid) {
+        Object marker = dynmapMarkerByEntity.remove(entityUuid);
+        if (marker == null) return;
+        try {
+            marker.getClass().getMethod("deleteMarker").invoke(marker);
         } catch (Throwable ignored) {}
-        return null;
     }
 
     // -------------------------------------------------------------------------
-    // Utilities
+    // Utility helpers
     // -------------------------------------------------------------------------
 
     private int randomInt(int min, int max) {
@@ -1334,6 +1367,24 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         return v;
     }
 
+    private String toValidUsername(String input) {
+        if (input == null) input = "IndevMob";
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') ||
+                    (c >= 'A' && c <= 'Z') ||
+                    (c >= '0' && c <= '9') ||
+                    (c == '_');
+            out.append(ok ? c : '_');
+        }
+        String s = out.toString();
+        while (s.startsWith("_")) s = s.substring(1);
+        if (s.isEmpty()) s = "IndevMob";
+        if (s.length() > 16) s = s.substring(0, 16);
+        return s;
+    }
+
     private static final class SkinData {
         final String value;
         final String signature;
@@ -1342,4 +1393,68 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             this.signature = signature;
         }
     }
+
+// -------------------------------------------------------------------------
+// Hacky fallback: identify Indev NPCs by their player name, then add drops and
+// suppress obituary messages. This is intentionally hardcoded.
+// -------------------------------------------------------------------------
+
+@EventHandler(priority = EventPriority.HIGHEST)
+public void onIndevNpcDeathByName(PlayerDeathEvent event) {
+    Player dead = event.getEntity();
+    if (dead == null) return;
+
+    String name = dead.getName();
+    if (!isIndevNpcName(name)) return;
+
+    // Suppress obituary/death message
+    try { event.setDeathMessage(null); } catch (Throwable ignored) {}
+
+    // Add our custom drops (do NOT clear drops, so head-drop plugins can still add heads)
+    String lower = name.toLowerCase(java.util.Locale.ROOT);
+    if (lower.equals("indevrana")) {
+        addRandomDrop(event.getDrops(), Material.APPLE, 0, 2);
+        if (Math.random() < 0.05) addRandomDrop(event.getDrops(), Material.GOLDEN_APPLE, 0, 1);
+        if (Math.random() < 0.05) addRandomDrop(event.getDrops(), Material.FLINT_AND_STEEL, 0, 1);
+    } else if (lower.equals("indevsteve") || lower.equals("indevblksteve") || lower.equals("indevbeastboy")) {
+        addRandomDrop(event.getDrops(), Material.FEATHER, 0, 2);
+        addRandomDrop(event.getDrops(), Material.GUNPOWDER, 0, 2);
+        addRandomDrop(event.getDrops(), Material.STRING, 0, 2);
+        if (Math.random() < 0.05) addRandomDrop(event.getDrops(), Material.FLINT_AND_STEEL, 0, 1);
+    }
+}
+
+// Stomp any later death-message changes by other plugins
+@EventHandler(priority = EventPriority.MONITOR)
+public void onIndevNpcDeathByNameMonitor(PlayerDeathEvent event) {
+    Player dead = event.getEntity();
+    if (dead == null) return;
+
+    if (!isIndevNpcName(dead.getName())) return;
+    try { event.setDeathMessage(null); } catch (Throwable ignored) {}
+}
+
+private boolean isIndevNpcName(String name) {
+    if (name == null) return false;
+    return name.equalsIgnoreCase("IndevRana")
+            || name.equalsIgnoreCase("IndevSteve")
+            || name.equalsIgnoreCase("IndevBlkSteve")
+            || name.equalsIgnoreCase("IndevBeastBoy");
+}
+
+private void addRandomDrop(java.util.List<ItemStack> drops, Material material, int minAmount, int maxAmount) {
+    if (drops == null || material == null) return;
+    if (maxAmount < minAmount) maxAmount = minAmount;
+
+    int amount;
+    if (maxAmount == minAmount) {
+        amount = minAmount;
+    } else {
+        amount = minAmount + (int) Math.floor(Math.random() * (maxAmount - minAmount + 1));
+    }
+
+    if (amount <= 0) return;
+    drops.add(new ItemStack(material, amount));
+}
+
 }

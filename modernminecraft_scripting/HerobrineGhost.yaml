@@ -1,9 +1,10 @@
 name: HerobrineGhost
 main: HerobrineGhost
-version: 1.0.0
+version: 1.0.1
+api-version: "1.21"
 author: ChatGPT
-description: Subtle Herobrine-style ghost sightings using a fake player.
-softdepend: [ProtocolLib]
+description: Subtle Herobrine-style ghost sightings using a Citizens NPC.
+softdepend: [Citizens]
 commands:
   herobrineghost:
     description: Control HerobrineGhost (reload config or spawn test ghost).
