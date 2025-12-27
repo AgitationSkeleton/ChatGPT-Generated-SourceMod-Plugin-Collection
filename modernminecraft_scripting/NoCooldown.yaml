@@ -1,0 +1,14 @@
+name: NoCooldown
+main: com.redchanit.nocooldown.NoCooldown
+version: 1.0
+api-version: 1.21
+description: Sets player attack speed very high to effectively remove melee cooldown.
+author: ChatGPT
+commands:
+  nocooldown:
+    description: Manage NoCooldown.
+    usage: /<command> [reload|set|apply]
+permissions:
+  nocooldown.admin:
+    description: Allows managing NoCooldown.
+    default: op

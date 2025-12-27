@@ -530,11 +530,16 @@ public final class HerobrineGhost extends JavaPlugin implements Listener {
 
     private void spawnGhostNearLocation(Player viewer, Location ghostLocation, long lifeTicks) {
         if (citizensBridge == null) return;
+        if (viewer == null || ghostLocation == null) return;
+
+        // Ensure the spawned ghost is facing the viewer (with pitch) at the moment it appears.
+        Location oriented = ghostLocation.clone();
+        lookAt(oriented, viewer.getEyeLocation());
 
         citizensBridge.spawnTemporaryPlayerNpc(
                 ghostDisplayName,
                 skinFromUsername,
-                ghostLocation,
+                oriented,
                 lifeTicks
         );
     }
@@ -691,11 +696,18 @@ public final class HerobrineGhost extends JavaPlugin implements Listener {
     }
 
     private void lookAt(Location from, Location target) {
+        // Aim the ghost's view at the target location (including pitch for "eye contact").
         double dx = target.getX() - from.getX();
+        double dy = target.getY() - from.getY();
         double dz = target.getZ() - from.getZ();
+
+        double xz = Math.sqrt(dx * dx + dz * dz);
         float yaw = (float) Math.toDegrees(Math.atan2(-dx, dz));
+        float pitch = (float) Math.toDegrees(Math.atan2(-dy, xz));
+
+        // Bukkit pitch is up/down where looking up is negative.
         from.setYaw(yaw);
-        from.setPitch(0.0F);
+        from.setPitch(pitch);
     }
 
     private String pickSummonLine() {

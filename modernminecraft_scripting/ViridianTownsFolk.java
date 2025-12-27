@@ -1,5 +1,10 @@
 package com.redchanit.viridiantownsfolk;
 
+import org.bukkit.event.player.PlayerPortalEvent;
+import org.bukkit.event.entity.EntityPortalEvent;
+import org.bukkit.event.EventPriority;
+import org.bukkit.World;
+import org.bukkit.Location;
 import net.citizensnpcs.api.CitizensAPI;
 import net.citizensnpcs.api.event.NPCSpawnEvent;
 import net.citizensnpcs.api.npc.NPC;
@@ -24,6 +29,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.regex.Pattern;
+import net.citizensnpcs.trait.SkinTrait;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * ViridianTownsFolk (RESET baseline, crash-safe)
@@ -78,6 +88,60 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
 
     private static final String SCORE_TAG = "vtf_managed";
 
+
+/* ============================================================
+ *  Townsfolk skins (MineSkin + Citizens SkinTrait)
+ * ============================================================ */
+
+private static final List<String> TOWNSFOLK_SKIN_FILES = Arrays.asList(
+        "acolyte.png",
+        "acolyte_f.png",
+        "dockhand.png",
+        "dockhand_f.png",
+        "farmer.png",
+        "farmer_f.png",
+        "guard.png",
+        "guard_f.png",
+        "hermit.png",
+        "mason.png",
+        "mason_f.png",
+        "merchant.png",
+        "merchant_f.png",
+        "priest.png",
+        "ranger.png",
+        "scholar.png",
+        "scribe.png",
+        "sentinel.png",
+        "smith.png",
+        "smith_f.png",
+        "townsfolk.png",
+        "townsfolk_f.png",
+        "watchman.png",
+        "worker.png",
+        "worker_f.png"
+);
+
+private static final class SkinData {
+    final String value;
+    final String signature;
+    SkinData(String value, String signature) {
+        this.value = value;
+        this.signature = signature;
+    }
+}
+
+// skinKey (base filename without .png, lowercase) -> value/signature
+private final Map<String, SkinData> skinCache = new ConcurrentHashMap<>();
+private final Object mineSkinRateLock = new Object();
+private volatile long nextMineSkinRequestAtMs = 0L;
+private volatile boolean warnedBlankMineSkinKey = false;
+
+private int skinRetryTaskId = -1;
+private int skinEnforceTaskId = -1;
+
+private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
+
+
     /* ============================================================
      *  Legacy/adoption heuristics and exclusions
      * ============================================================ */
@@ -131,6 +195,11 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
     private boolean allowSpawningInNether = false;
     private boolean allowSpawningInEnd = false;
 
+    // Portal usage (Citizens NPCs owned by VTF)
+    private boolean allowNetherPortals = false;
+    private boolean allowEndPortals = false;
+
+
     private boolean hideNameplates = true;
 
     // Citizens collision (pushable/bumpable)
@@ -180,9 +249,15 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         KEY_VTF_ROLE = new NamespacedKey(this, "vtf_role");
         KEY_VTF_SITE = new NamespacedKey(this, "vtf_site");
         KEY_VTF_VER = new NamespacedKey(this, "vtf_ver");
+        KEY_VTF_SKIN = new NamespacedKey(this, "vtf_skin");
 
         ensureConfigFile();
         loadConfigValues();
+
+
+ensureSkinFolder();
+loadSkinCacheFromConfig();
+startSkinTasks();
 
         if (!enabled) {
             getLogger().info("ViridianTownsFolk disabled in config.yml.");
@@ -337,6 +412,7 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         // If already managed, wake it.
         if (isManagedNpc(npc)) {
             wakeNpc(npc, "npcspawn-managed");
+            ensureTownSkinApplied(npc, "npcspawn-managed");
             return;
         }
 
@@ -351,6 +427,7 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
 
             tagManaged(npc);
             wakeNpc(npc, "npcspawn-adopted");
+            ensureTownSkinApplied(npc, "npcspawn-adopted");
         }
     }
 
@@ -422,6 +499,54 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         wakeNpc(npc, "interact");
         e.getPlayer().sendMessage(ChatColor.GRAY + pickDialogue(npc));
     }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEntityPortal(EntityPortalEvent event) {
+        org.bukkit.entity.Entity ent = event.getEntity();
+        if (!isVtfManagedEntity(ent)) return;
+
+        Location from = event.getFrom();
+        Location to = event.getTo();
+
+        World.Environment fromEnv = (from != null && from.getWorld() != null) ? from.getWorld().getEnvironment() : null;
+        World.Environment toEnv = (to != null && to.getWorld() != null) ? to.getWorld().getEnvironment() : null;
+
+        // Nether portal travel (either direction)
+        if (!allowNetherPortals && (fromEnv == World.Environment.NETHER || toEnv == World.Environment.NETHER)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        // End portal / gateway travel (either direction)
+        if (!allowEndPortals && (fromEnv == World.Environment.THE_END || toEnv == World.Environment.THE_END)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onPlayerPortal(PlayerPortalEvent event) {
+        // Citizens NPCs can sometimes fire PlayerPortalEvent if their entity type is PLAYER
+        Player player = event.getPlayer();
+        if (player == null) return;
+        if (!isVtfManagedEntity(player)) return;
+
+        Location from = event.getFrom();
+        Location to = event.getTo();
+
+        World.Environment fromEnv = (from != null && from.getWorld() != null) ? from.getWorld().getEnvironment() : null;
+        World.Environment toEnv = (to != null && to.getWorld() != null) ? to.getWorld().getEnvironment() : null;
+
+        if (!allowNetherPortals && (fromEnv == World.Environment.NETHER || toEnv == World.Environment.NETHER)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        if (!allowEndPortals && (fromEnv == World.Environment.THE_END || toEnv == World.Environment.THE_END)) {
+            event.setCancelled(true);
+        }
+    }
+
+
 
     private String pickDialogue(NPC npc) {
         boolean night = false;
@@ -676,6 +801,7 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
             npc.spawn(spawnLoc);
 
             tagManaged(npc);
+            ensureTownSkinApplied(npc, "spawn");
 
             Entity ent = npc.getEntity();
             if (ent != null) {
@@ -866,6 +992,21 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         Byte b = pdc.get(KEY_VTF_MANAGED, PersistentDataType.BYTE);
         return b != null && b == (byte) 1;
     }
+
+    private boolean isVtfManagedEntity(org.bukkit.entity.Entity ent) {
+        if (ent == null) return false;
+        try {
+            if (ent.getScoreboardTags() != null && ent.getScoreboardTags().contains(SCORE_TAG)) return true;
+        } catch (Throwable ignored) {}
+        try {
+            PersistentDataContainer pdc = ent.getPersistentDataContainer();
+            Byte b = pdc.get(KEY_VTF_MANAGED, PersistentDataType.BYTE);
+            return b != null && b == (byte) 1;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
 
     private void tagManaged(NPC npc) {
         if (!npc.isSpawned()) return;
@@ -1272,6 +1413,21 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
                 "  allowNether: false\n" +
                 "  allowEnd: false\n" +
                 "\n" +
+                "portals:\n" +
+                "  allowNetherPortals: false\n" +
+                "  allowEndPortals: false\n" +
+                "\n" +
+                "skins:\n" +
+                "  localFolderName: skins\n" +
+                "  preloadOnEnable: true\n" +
+                "  allowMineskinRequests: true\n" +
+                "  mineskinApiKey: \"\"\n" +
+                "  userAgent: ViridianTownsFolk/1.0\n" +
+                "  visibility: unlisted\n" +
+                "  mineskinCooldownSeconds: 12\n" +
+                "  enforceIntervalSeconds: 45\n" +
+                "  retryMissingIntervalSeconds: 300\n" +
+                "\n" +
                 "nametags:\n" +
                 "  hideNameplates: true\n" +
                 "\n" +
@@ -1331,6 +1487,10 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
 
             allowSpawningInNether = getConfig().getBoolean("dimensions.allowNether", allowSpawningInNether);
             allowSpawningInEnd = getConfig().getBoolean("dimensions.allowEnd", allowSpawningInEnd);
+
+            allowNetherPortals = getConfig().getBoolean("portals.allowNetherPortals", allowNetherPortals);
+            allowEndPortals = getConfig().getBoolean("portals.allowEndPortals", allowEndPortals);
+
 
             hideNameplates = getConfig().getBoolean("nametags.hideNameplates", hideNameplates);
 
@@ -1395,4 +1555,543 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
     private static double parseDoubleSafe(String s, double def) {
         try { return Double.parseDouble(s); } catch (Throwable t) { return def; }
     }
+
+
+/* ============================================================
+ *  Skin logic
+ * ============================================================ */
+
+private File getSkinDirectory() {
+    String folderName = getConfig().getString("skins.localFolderName", "skins");
+    if (folderName == null || folderName.trim().isEmpty()) folderName = "skins";
+    return new File(getDataFolder(), folderName);
+}
+
+private void ensureSkinFolder() {
+    try {
+        File dir = getSkinDirectory();
+        if (!dir.exists()) {
+            boolean ok = dir.mkdirs();
+            if (!ok) getLogger().warning("Failed to create skins folder: " + dir.getPath());
+        }
+    } catch (Throwable t) {
+        getLogger().warning("Failed ensuring skins folder: " + t.getMessage());
+    }
+}
+
+private static String skinKeyFromFile(String fileName) {
+    if (fileName == null) return null;
+    String s = fileName.trim().toLowerCase(Locale.ROOT);
+    if (s.endsWith(".png")) s = s.substring(0, s.length() - 4);
+    return s;
+}
+
+private static boolean isFemaleSkinKey(String skinKey) {
+    return skinKey != null && skinKey.toLowerCase(Locale.ROOT).endsWith("_f");
+}
+
+private void loadSkinCacheFromConfig() {
+    try {
+        for (String file : TOWNSFOLK_SKIN_FILES) {
+            String key = skinKeyFromFile(file);
+            if (key == null) continue;
+
+            String base = "skins.cached." + key + ".";
+            String value = getConfig().getString(base + "value", "");
+            String sig = getConfig().getString(base + "signature", "");
+            if (value != null && sig != null && !value.isEmpty() && !sig.isEmpty()) {
+                skinCache.put(key, new SkinData(value, sig));
+            }
+        }
+    } catch (Throwable t) {
+        getLogger().warning("Failed loading skin cache: " + t.getMessage());
+    }
+}
+
+private void persistSkinCacheEntry(String skinKey, SkinData data) {
+    if (skinKey == null || data == null) return;
+    try {
+        String base = "skins.cached." + skinKey + ".";
+        getConfig().set(base + "value", data.value);
+        getConfig().set(base + "signature", data.signature);
+        saveConfig();
+    } catch (Throwable t) {
+        getLogger().warning("Failed saving skin cache entry for " + skinKey + ": " + t.getMessage());
+    }
+}
+
+private void startSkinTasks() {
+    // cancel previous
+    if (skinRetryTaskId != -1) {
+        Bukkit.getScheduler().cancelTask(skinRetryTaskId);
+        skinRetryTaskId = -1;
+    }
+    if (skinEnforceTaskId != -1) {
+        Bukkit.getScheduler().cancelTask(skinEnforceTaskId);
+        skinEnforceTaskId = -1;
+    }
+
+    final int retrySeconds = Math.max(30, getConfig().getInt("skins.retryMissingIntervalSeconds", 300));
+    final int enforceSeconds = Math.max(10, getConfig().getInt("skins.enforceIntervalSeconds", 45));
+
+    // Preload (async)
+    if (getConfig().getBoolean("skins.preloadOnEnable", true)) {
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            for (String file : TOWNSFOLK_SKIN_FILES) {
+                String key = skinKeyFromFile(file);
+                if (key == null) continue;
+                try { ensureSkinLoaded(key); } catch (Throwable ignored) { }
+            }
+        });
+    }
+
+    // Periodic retry of missing (async)
+    skinRetryTaskId = Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
+        for (String file : TOWNSFOLK_SKIN_FILES) {
+            String key = skinKeyFromFile(file);
+            if (key == null) continue;
+            if (skinCache.containsKey(key)) continue;
+            try { ensureSkinLoaded(key); } catch (Throwable ignored) { }
+        }
+    }, 40L, retrySeconds * 20L).getTaskId();
+
+    // Periodic enforce (sync): apply to managed NPCs not using our skins
+    skinEnforceTaskId = Bukkit.getScheduler().runTaskTimer(this, () -> {
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (npc == null) continue;
+            if (!npc.isSpawned()) continue;
+            if (isExcludedNpc(npc)) continue;
+            if (!isManagedNpc(npc)) continue;
+            ensureTownSkinApplied(npc, "periodic");
+        }
+    }, 60L, enforceSeconds * 20L).getTaskId();
+}
+
+private String pickRandomTownsfolkSkinKey() {
+    // Fallback: pick any known townsfolk skin at random.
+    String file = TOWNSFOLK_SKIN_FILES.get(ThreadLocalRandom.current().nextInt(TOWNSFOLK_SKIN_FILES.size()));
+    return skinKeyFromFile(file);
+}
+
+private String pickRoleBasedSkinKey(NPC npc) {
+    if (npc == null) return null;
+
+    String roleBase = roleBaseFromNpcName(npc.getName());
+    if (roleBase == null) return null;
+
+    // Prefer 50/50 female variant if available for the role.
+    boolean hasFemale = TOWNSFOLK_SKIN_FILES.contains(roleBase + "_f.png");
+    if (hasFemale) {
+        // Deterministic "coin flip" so the NPC doesn't swap genders/skins every scan.
+        // Citizens NPC IDs are stable; use that for the 50% split.
+        int coin = Math.floorMod(Integer.valueOf(npc.getId()).hashCode(), 2);
+        if (coin == 0) {
+            return skinKeyFromFile(roleBase + "_f.png");
+        }
+    }
+    return skinKeyFromFile(roleBase + ".png");
+}
+
+private String roleBaseFromNpcName(String rawName) {
+    if (rawName == null) return null;
+
+    // Strip Bukkit color codes if present (§x) and trim.
+    String name = rawName.replaceAll("(?i)\u00A7[0-9A-FK-OR]", "").trim();
+    if (name.isEmpty()) return null;
+
+    // Use the first "word" to determine role (e.g., "Guard", "Guard 12", "Guard - East Gate")
+    String firstToken = name.split("\\s+")[0].trim();
+    if (firstToken.isEmpty()) return null;
+
+    String token = firstToken.toLowerCase();
+
+    // Map display names to skin base names (filenames without extension, without _f).
+    if (token.equals("acolyte")) return "acolyte";
+    if (token.equals("dockhand")) return "dockhand";
+    if (token.equals("farmer")) return "farmer";
+    if (token.equals("guard")) return "guard";
+    if (token.equals("hermit")) return "hermit";
+    if (token.equals("mason")) return "mason";
+    if (token.equals("merchant")) return "merchant";
+    if (token.equals("priest")) return "priest";
+    if (token.equals("ranger")) return "ranger";
+    if (token.equals("scholar")) return "scholar";
+    if (token.equals("scribe")) return "scribe";
+    if (token.equals("sentinel")) return "sentinel";
+    if (token.equals("smith")) return "smith";
+    if (token.equals("townsfolk")) return "townsfolk";
+    if (token.equals("watchman")) return "watchman";
+    if (token.equals("worker")) return "worker";
+
+    // Unknown role name: no role-based skin.
+    return null;
+}
+
+private String getStoredSkinKey(NPC npc) {
+    if (npc == null || !npc.isSpawned()) return null;
+    try {
+        Entity ent = npc.getEntity();
+        if (ent == null) return null;
+        PersistentDataContainer pdc = ent.getPersistentDataContainer();
+        String key = pdc.get(KEY_VTF_SKIN, PersistentDataType.STRING);
+        if (key == null) return null;
+        key = key.trim().toLowerCase(Locale.ROOT);
+        return key.isEmpty() ? null : key;
+    } catch (Throwable ignored) {
+        return null;
+    }
+}
+
+private void setStoredSkinKey(NPC npc, String skinKey) {
+    if (npc == null || !npc.isSpawned()) return;
+    try {
+        Entity ent = npc.getEntity();
+        if (ent == null) return;
+        if (skinKey == null) return;
+        String k = skinKey.trim().toLowerCase(Locale.ROOT);
+        if (k.isEmpty()) return;
+        ent.getPersistentDataContainer().set(KEY_VTF_SKIN, PersistentDataType.STRING, k);
+    } catch (Throwable ignored) { }
+}
+
+private boolean isAllowedTownsfolkSkinKey(String skinKey) {
+    if (skinKey == null) return false;
+    String k = skinKey.trim().toLowerCase(Locale.ROOT);
+    if (k.isEmpty()) return false;
+    for (String file : TOWNSFOLK_SKIN_FILES) {
+        String fk = skinKeyFromFile(file);
+        if (k.equals(fk)) return true;
+    }
+    return false;
+}
+
+private String getCurrentSkinNameSafe(NPC npc) {
+    try {
+        SkinTrait trait = npc.getOrAddTrait(SkinTrait.class);
+        try {
+            // Citizens has getSkinName() in many builds, but guard just in case
+            return (String) SkinTrait.class.getMethod("getSkinName").invoke(trait);
+        } catch (Throwable ignored) {
+            return null;
+        }
+    } catch (Throwable ignored) {
+        return null;
+    }
+}
+
+private void applySkinToNpc(NPC npc, String skinKey, SkinData skin) {
+    if (npc == null || skinKey == null || skin == null) return;
+    if (!npc.isSpawned()) return;
+    try {
+        String skinName = "VTF_" + skinKey;
+        SkinTrait trait = npc.getOrAddTrait(SkinTrait.class);
+        trait.setSkinPersistent(skinName, skin.signature, skin.value);
+        setStoredSkinKey(npc, skinKey);
+    } catch (Throwable t) {
+        getLogger().warning("Failed to apply skin '" + skinKey + "': " + t.getMessage());
+    }
+}
+
+private void ensureTownSkinApplied(NPC npc, String reason) {
+    if (npc == null) return;
+    if (!npc.isSpawned()) return;
+
+    // Prefer a role-based skin derived from the NPC's name (e.g., "Guard" -> guard.png).
+    String desiredKey = pickRoleBasedSkinKey(npc);
+    if (desiredKey != null && isAllowedTownsfolkSkinKey(desiredKey)) {
+        setStoredSkinKey(npc, desiredKey);
+    } else {
+        // Fall back to stored/random behavior if role is unknown.
+        desiredKey = getStoredSkinKey(npc);
+
+        if (!isAllowedTownsfolkSkinKey(desiredKey)) {
+            desiredKey = pickRandomTownsfolkSkinKey();
+            if (desiredKey != null) setStoredSkinKey(npc, desiredKey);
+        }
+    }
+
+    if (desiredKey == null) return;
+
+    // If already visibly the correct one of ours, skip.
+    String currentSkinName = getCurrentSkinNameSafe(npc);
+    if (currentSkinName != null) {
+        String expectedSkinName = "VTF_" + desiredKey;
+        if (currentSkinName.equalsIgnoreCase(expectedSkinName)) {
+            return;
+        }
+    }
+
+    // If cached, apply immediately on main thread.
+    SkinData cached = skinCache.get(desiredKey);
+    if (cached != null) {
+        applySkinToNpc(npc, desiredKey, cached);
+        return;
+    }
+
+    // Not cached: load/upload async (never block main thread), then apply sync.
+    final String finalDesiredKey = desiredKey;
+    Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+        SkinData loaded = ensureSkinLoaded(finalDesiredKey);
+        if (loaded == null) return;
+        Bukkit.getScheduler().runTask(this, () -> {
+            if (npc.isSpawned()) applySkinToNpc(npc, finalDesiredKey, loaded);
+        });
+    });
+}
+
+private SkinData ensureSkinLoaded(String skinKey) {
+    if (skinKey == null) return null;
+    String k = skinKey.toLowerCase(Locale.ROOT).trim();
+    if (k.isEmpty()) return null;
+
+    SkinData existing = skinCache.get(k);
+    if (existing != null) return existing;
+
+    if (!getConfig().getBoolean("skins.allowMineskinRequests", true)) return null;
+
+    String apiKey = getConfig().getString("skins.mineskinApiKey", "").trim();
+    if (apiKey.isEmpty()) {
+        if (!warnedBlankMineSkinKey) {
+            warnedBlankMineSkinKey = true;
+            getLogger().warning("MineSkin API key is blank. Townsfolk skins will not be uploaded. Place your PNGs in the skins folder and set skins.mineskinApiKey to enable uploads.");
+        }
+        return null;
+    }
+
+    File dir = getSkinDirectory();
+    File f = new File(dir, k + ".png");
+    if (!f.exists() || f.length() <= 0) {
+        // The user may have not installed skins yet; don't spam log on every retry.
+        return null;
+    }
+
+    byte[] pngBytes = readFileBytes(f);
+    if (pngBytes == null || pngBytes.length == 0) return null;
+
+    String variant = isFemaleSkinKey(k) ? "slim" : "classic";
+    String visibility = getConfig().getString("skins.visibility", "unlisted");
+    String userAgent = getConfig().getString("skins.userAgent", "ViridianTownsFolk/1.0");
+
+    SkinData data = requestMineSkinByUploadBytes(pngBytes, "VTF_" + k, variant, visibility, apiKey, userAgent);
+    if (data != null) {
+        skinCache.put(k, data);
+        // Persist to disk on main thread to avoid Bukkit config threading weirdness.
+        final SkinData persist = data;
+        Bukkit.getScheduler().runTask(this, () -> persistSkinCacheEntry(k, persist));
+    }
+    return data;
+}
+
+private SkinData requestMineSkinByUploadBytes(byte[] pngBytes, String name, String variant, String visibility,
+                                             String apiKey, String userAgent) {
+
+    final int maxAttempts = Math.max(1, getConfig().getInt("skins.mineskinMaxAttempts", 5));
+    final long cooldownMs = Math.max(1000L, getConfig().getLong("skins.mineskinCooldownSeconds", 12) * 1000L);
+
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+        HttpURLConnection conn = null;
+        try {
+            // Global cooldown/rate-limit guard across all uploads
+            synchronized (mineSkinRateLock) {
+                long now = System.currentTimeMillis();
+                long wait = nextMineSkinRequestAtMs - now;
+                if (wait > 0) {
+                    try {
+                        Thread.sleep(wait);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return null;
+                    }
+                }
+                nextMineSkinRequestAtMs = System.currentTimeMillis() + cooldownMs;
+            }
+
+            URL url = new URL("https://api.mineskin.org/generate/upload");
+            conn = (HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(15000);
+            conn.setReadTimeout(60000);
+            conn.setRequestMethod("POST");
+            conn.setDoOutput(true);
+
+            conn.setRequestProperty("Accept", "application/json");
+            conn.setRequestProperty("User-Agent", userAgent);
+            if (!apiKey.isEmpty()) conn.setRequestProperty("Authorization", "Bearer " + apiKey);
+
+            String boundary = "----VTFBoundary" + System.nanoTime();
+            conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+            try (OutputStream os = conn.getOutputStream()) {
+                String safeName = sanitizeName(name);
+                writeFormField(os, boundary, "name", safeName);
+                writeFormField(os, boundary, "variant", variant);
+                writeFormField(os, boundary, "visibility", visibility);
+                writeFileField(os, boundary, "file", name + ".png", "image/png", pngBytes);
+                os.write(("--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+            }
+
+            int code = conn.getResponseCode();
+            String body = readAll((code >= 200 && code < 300) ? conn.getInputStream() : conn.getErrorStream());
+
+            if (code >= 200 && code < 300) {
+                String value = extractJsonString(body, "\"value\":\"");
+                String signature = extractJsonString(body, "\"signature\":\"");
+                if (value == null || signature == null || value.isEmpty() || signature.isEmpty()) {
+                    getLogger().warning("MineSkin response missing value/signature.");
+                    return null;
+                }
+                return new SkinData(value, signature);
+            }
+
+            if (code == 429) {
+                long waitMs = parseMineSkinBackoffMs(body);
+
+                if (attempt >= maxAttempts) {
+                    getLogger().warning("MineSkin upload failed (429) after " + maxAttempts + " attempts: " + body);
+                    return null;
+                }
+
+                getLogger().warning("MineSkin rate limited (429). Backing off for " + waitMs +
+                        "ms (attempt " + attempt + "/" + maxAttempts + ").");
+
+                try {
+                    Thread.sleep(waitMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+                continue;
+            }
+
+            getLogger().warning("MineSkin upload failed (" + code + "): " + body);
+            return null;
+
+        } catch (Throwable ex) {
+            getLogger().warning("MineSkin upload error: " + ex.getMessage());
+            return null;
+        } finally {
+            if (conn != null) conn.disconnect();
+        }
+    }
+
+    return null;
+}
+
+private static String sanitizeName(String s) {
+    if (s == null) return "vtf";
+    String t = s.trim();
+    if (t.length() > 32) t = t.substring(0, 32);
+    t = t.replaceAll("[^A-Za-z0-9_\\- ]", "");
+    if (t.isEmpty()) t = "vtf";
+    return t;
+}
+
+private static void writeFormField(OutputStream os, String boundary, String name, String value) throws IOException {
+    os.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+    os.write(("Content-Disposition: form-data; name=\"" + name + "\"\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+    os.write((value + "\r\n").getBytes(StandardCharsets.UTF_8));
+}
+
+private static void writeFileField(OutputStream os, String boundary, String name, String filename, String contentType, byte[] bytes) throws IOException {
+    os.write(("--" + boundary + "\r\n").getBytes(StandardCharsets.UTF_8));
+    os.write(("Content-Disposition: form-data; name=\"" + name + "\"; filename=\"" + filename + "\"\r\n").getBytes(StandardCharsets.UTF_8));
+    os.write(("Content-Type: " + contentType + "\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+    os.write(bytes);
+    os.write("\r\n".getBytes(StandardCharsets.UTF_8));
+}
+
+private static String readAll(InputStream is) throws IOException {
+    if (is == null) return "";
+    try (ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+        byte[] buf = new byte[4096];
+        int r;
+        while ((r = is.read(buf)) != -1) {
+            baos.write(buf, 0, r);
+        }
+        return baos.toString(StandardCharsets.UTF_8);
+    }
+}
+
+private static String extractJsonString(String json, String needle) {
+    if (json == null) return null;
+    int idx = json.indexOf(needle);
+    if (idx < 0) return null;
+    idx += needle.length();
+    StringBuilder sb = new StringBuilder();
+    boolean escape = false;
+    for (int i = idx; i < json.length(); i++) {
+        char c = json.charAt(i);
+        if (escape) {
+            // handle basic escapes
+            if (c == 'n') sb.append('\n');
+            else if (c == 'r') sb.append('\r');
+            else if (c == 't') sb.append('\t');
+            else sb.append(c);
+            escape = false;
+            continue;
+        }
+        if (c == '\\') {
+            escape = true;
+            continue;
+        }
+        if (c == '"') break;
+        sb.append(c);
+    }
+    return sb.toString();
+}
+
+private static long parseMineSkinBackoffMs(String body) {
+    // MineSkin sometimes returns "nextRequest":<seconds> or similar fields; fallback to 10s.
+    if (body == null) return 10000L;
+    try {
+        // Try: "nextRequest":12345 (ms) OR "nextRequest":12 (seconds) OR "retry_after":...
+        Long n = extractJsonNumber(body, "nextRequest");
+        if (n != null) {
+            if (n < 1000L) return Math.max(1000L, n * 1000L);
+            return Math.max(1000L, n);
+        }
+        Long r = extractJsonNumber(body, "retry_after");
+        if (r != null) return Math.max(1000L, r * 1000L);
+    } catch (Throwable ignored) { }
+    return 10000L;
+}
+
+private static Long extractJsonNumber(String json, String key) {
+    if (json == null || key == null) return null;
+    String needle = "\"" + key + "\"";
+    int idx = json.indexOf(needle);
+    if (idx < 0) return null;
+    idx = json.indexOf(":", idx);
+    if (idx < 0) return null;
+    idx++;
+    while (idx < json.length() && Character.isWhitespace(json.charAt(idx))) idx++;
+    StringBuilder sb = new StringBuilder();
+    while (idx < json.length()) {
+        char c = json.charAt(idx);
+        if ((c >= '0' && c <= '9')) {
+            sb.append(c);
+            idx++;
+            continue;
+        }
+        break;
+    }
+    if (sb.length() == 0) return null;
+    try { return Long.parseLong(sb.toString()); } catch (Throwable ignored) { return null; }
+}
+
+private static byte[] readFileBytes(File f) {
+    if (f == null || !f.exists()) return null;
+    try (FileInputStream fis = new FileInputStream(f);
+         ByteArrayOutputStream baos = new ByteArrayOutputStream()) {
+        byte[] buf = new byte[8192];
+        int r;
+        while ((r = fis.read(buf)) != -1) {
+            baos.write(buf, 0, r);
+        }
+        return baos.toByteArray();
+    } catch (Throwable ignored) {
+        return null;
+    }
+}
+
+
 }
