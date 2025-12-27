@@ -8,4 +8,4 @@ description: Citizens-based Mercenary NPC mobs with taming, factions, and specia
 commands:
   mercs:
     description: Command your tamed mercs (stop/follow/patrol), debug spawn, or manage MercMobs.
-    usage: /<command> <stop|follow|patrol|spawn|reload|status>
+    usage: /<command> <stop|follow|patrol|share|unshare|spawn|reload|status>

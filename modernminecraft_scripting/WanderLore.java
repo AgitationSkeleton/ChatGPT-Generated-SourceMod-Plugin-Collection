@@ -11,6 +11,7 @@ import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.*;
 import org.bukkit.event.player.*;
+import org.bukkit.event.entity.EntityPortalEvent;
 import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemFlag;
@@ -84,8 +85,17 @@ public class WanderLore extends JavaPlugin implements Listener {
 
     private List<String> worldAllowList;
     private int minDistanceFromSpawnBlocks;
-    private double structureChancePerNewChunk;
+    private double structureChancePerNewChunk; // legacy (overworld fallback)
+    private double structureChanceOverworld;
+    private double structureChanceNether;
+    private double structureChanceEnd;
+    private boolean allowNether;
+    private boolean allowEnd;
+    private boolean npcAllowNetherPortals;
+    private boolean npcAllowEndPortals;
+
     private double npcChanceGivenStructure;
+    private int maxNpcsPerWorld;
     private int maxStructuresPerHour;
     private int minY;
     private int maxY;
@@ -242,14 +252,23 @@ public class WanderLore extends JavaPlugin implements Listener {
 
         cfg.set("worlds.allowList", Arrays.asList("world"));
         cfg.set("generation.minDistanceFromSpawnBlocks", 1200);
-        cfg.set("generation.structureChancePerNewChunk", 0.0018); // 0.18%
+        cfg.set("generation.structureChancePerNewChunk", 0.0018); // legacy (overworld fallback)
+        cfg.set("generation.structureChance.overworld", 0.0018); // 0.18% per new chunk
+        cfg.set("generation.structureChance.nether", 0.0010);    // 0.10% per new chunk
+        cfg.set("generation.structureChance.end", 0.0006);       // 0.06% per new chunk
+        cfg.set("generation.allowNether", true);
+        cfg.set("generation.allowEnd", true);
         cfg.set("generation.npcChanceGivenStructure", 0.03);
         cfg.set("generation.maxStructuresPerHour", 8);
 
+        // Overworld Y range (legacy; Nether/End use their own origin finders)
         cfg.set("generation.yRange.minY", 55);
         cfg.set("generation.yRange.maxY", 120);
 
         cfg.set("integration.citizens.enable", true);
+        cfg.set("integration.citizens.maxNpcsPerWorld", 12);
+        cfg.set("integration.citizens.portalUse.allowNetherPortals", false);
+        cfg.set("integration.citizens.portalUse.allowEndPortals", false);
 		cfg.set("integration.dynmap.npcMarkers.enable", true);
 		cfg.set("integration.dynmap.npcMarkers.markerSetId", "wanderlore.npcs");
 		cfg.set("integration.dynmap.npcMarkers.markerSetLabel", "npcs");
@@ -294,7 +313,32 @@ public class WanderLore extends JavaPlugin implements Listener {
                 "STONE_CIRCLE",
                 "SUNKEN_SHRINE",
                 "OBSIDIAN_STEP_PYRAMID",
-                "HANGING_TRIAL"
+                "HANGING_TRIAL",
+                "RUINED_WATCHTOWER",
+                "BURIED_CRYPT",
+                "LOST_LIBRARY"
+        ));
+
+        // Environment-specific structure pools (preferred; legacy list above still honored)
+        cfg.set("structures.overworld.enabled", Arrays.asList(
+                "RUINED_COTTAGE",
+                "STONE_CIRCLE",
+                "SUNKEN_SHRINE",
+                "OBSIDIAN_STEP_PYRAMID",
+                "HANGING_TRIAL",
+                "RUINED_WATCHTOWER",
+                "BURIED_CRYPT",
+                "LOST_LIBRARY"
+        ));
+        cfg.set("structures.nether.enabled", Arrays.asList(
+                "NETHER_SIGNAL_PYLON",
+                "BASALT_ALTAR",
+                "FORGOTTEN_HALL"
+        ));
+        cfg.set("structures.end.enabled", Arrays.asList(
+                "ENDER_OBELISK",
+                "VOID_RUIN",
+                "CHORUS_MAZE"
         ));
 
         // Alive-world defaults
@@ -338,12 +382,21 @@ public class WanderLore extends JavaPlugin implements Listener {
 
         minDistanceFromSpawnBlocks = getConfig().getInt("generation.minDistanceFromSpawnBlocks", 1200);
         structureChancePerNewChunk = getConfig().getDouble("generation.structureChancePerNewChunk", 0.0018);
+        structureChanceOverworld = getConfig().getDouble("generation.structureChance.overworld", structureChancePerNewChunk);
+        structureChanceNether = getConfig().getDouble("generation.structureChance.nether", Math.max(0.0, structureChancePerNewChunk * 0.6));
+        structureChanceEnd = getConfig().getDouble("generation.structureChance.end", Math.max(0.0, structureChancePerNewChunk * 0.35));
+        allowNether = getConfig().getBoolean("generation.allowNether", true);
+        allowEnd = getConfig().getBoolean("generation.allowEnd", true);
         npcChanceGivenStructure = getConfig().getDouble("generation.npcChanceGivenStructure", 0.03);
         maxStructuresPerHour = getConfig().getInt("generation.maxStructuresPerHour", 8);
         minY = getConfig().getInt("generation.yRange.minY", 55);
         maxY = getConfig().getInt("generation.yRange.maxY", 120);
 
         integrateCitizens = getConfig().getBoolean("integration.citizens.enable", true);
+
+        maxNpcsPerWorld = Math.max(0, getConfig().getInt("integration.citizens.maxNpcsPerWorld", 12));
+        npcAllowNetherPortals = getConfig().getBoolean("integration.citizens.portalUse.allowNetherPortals", false);
+        npcAllowEndPortals = getConfig().getBoolean("integration.citizens.portalUse.allowEndPortals", false);
         integrateDynmap = getConfig().getBoolean("integration.dynmap.enable", true);
         dynmapScanMinutes = Math.max(1, getConfig().getInt("integration.dynmap.scanEveryMinutes", 8));
         markerNpcChancePerScan = clampInt(getConfig().getInt("integration.dynmap.markerNpcChancePerScanPercent", 25), 0, 100);
@@ -380,6 +433,19 @@ public class WanderLore extends JavaPlugin implements Listener {
         watcherPlayerCooldownSeconds = Math.max(10, getConfig().getInt("aliveWorld.watchers.playerCooldownSeconds", 120));
         watcherCueChancePercent = clampInt(getConfig().getInt("aliveWorld.watchers.cueChancePercent", 18), 0, 100);
     }
+
+private boolean isOurNpcEntity(Entity entity) {
+    return entity != null && entity.hasMetadata(META_WANDERLORE_NPC);
+}
+
+private int countOurNpcEntities(World world) {
+    if (world == null) return 0;
+    int count = 0;
+    for (Entity e : world.getEntities()) {
+        if (isOurNpcEntity(e)) count++;
+    }
+    return count;
+}
 
     // -----------------------------
     // DB loading/saving
@@ -467,6 +533,17 @@ public class WanderLore extends JavaPlugin implements Listener {
         World world = event.getWorld();
         if (!isWorldAllowed(world)) return;
 
+        // Dimension gating (Overworld/Nether/End)
+        World.Environment env = world.getEnvironment();
+        if (env == World.Environment.NETHER && !allowNether) return;
+        if (env == World.Environment.THE_END && !allowEnd) return;
+
+        double envChance = switch (env) {
+            case NETHER -> structureChanceNether;
+            case THE_END -> structureChanceEnd;
+            default -> structureChanceOverworld;
+        };
+
         Location chunkCenter = new Location(world,
                 event.getChunk().getX() * 16 + 8,
                 80,
@@ -492,7 +569,7 @@ public class WanderLore extends JavaPlugin implements Listener {
 
         if (!rateLimitAllows(world.getName())) return;
 
-        if (chunkRandom.nextDouble() > structureChancePerNewChunk) {
+        if (chunkRandom.nextDouble() > envChance) {
             return;
         }
 
@@ -517,6 +594,27 @@ public class WanderLore extends JavaPlugin implements Listener {
         String npcId = clicked.getMetadata(META_WANDERLORE_NPC).get(0).asString();
         beginNpcDialogue(player, npcId);
     }
+
+@EventHandler(ignoreCancelled = true)
+public void onEntityPortal(EntityPortalEvent event) {
+    if (!enabled) return;
+
+    Entity entity = event.getEntity();
+    if (!isOurNpcEntity(entity)) return;
+
+    Location to = event.getTo();
+    if (to == null || to.getWorld() == null) return;
+
+    World.Environment envTo = to.getWorld().getEnvironment();
+    if (envTo == World.Environment.NETHER && !npcAllowNetherPortals) {
+        event.setCancelled(true);
+        return;
+    }
+    if (envTo == World.Environment.THE_END && !npcAllowEndPortals) {
+        event.setCancelled(true);
+    }
+}
+
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onAsyncChat(AsyncPlayerChatEvent event) {
@@ -545,7 +643,28 @@ public class WanderLore extends JavaPlugin implements Listener {
         if (!command.getName().equalsIgnoreCase("wanderlore")) return false;
 
         if (args.length == 0) {
-            sender.sendMessage(color("&7[&bWanderLore&7] &f/wanderlore reload | stats | spawn"));
+    if (args[0].equalsIgnoreCase("purgeNpcs") || args[0].equalsIgnoreCase("purgenpcs")) {
+    if (!sender.hasPermission("wanderlore.admin")) {
+        sender.sendMessage(color("&cNo permission."));
+        return true;
+    }
+    String targetWorldName = (args.length >= 2) ? args[1] : null;
+    int removed = purgeOwnedNpcs(targetWorldName);
+    sender.sendMessage(color("&7[&bWanderLore&7] &aPurged &f" + removed + "&a WanderLore NPC(s)."));
+    return true;
+}
+
+if (args[0].equalsIgnoreCase("purgeAllNpcs") || args[0].equalsIgnoreCase("purgeallnpcs")) {
+    if (!sender.hasPermission("wanderlore.admin")) {
+        sender.sendMessage(color("&cNo permission."));
+        return true;
+    }
+    int removed = purgeOwnedNpcs(null);
+    sender.sendMessage(color("&7[&bWanderLore&7] &aPurged &f" + removed + "&a WanderLore NPC(s) in all worlds."));
+    return true;
+}
+
+        sender.sendMessage(color("&7[&bWanderLore&7] &f/wanderlore reload | stats | spawn | purgeNpcs [world] | purgeAllNpcs"));
             return true;
         }
 
@@ -594,13 +713,17 @@ public class WanderLore extends JavaPlugin implements Listener {
             Location loc = player.getLocation();
 
             Random r = new Random(System.currentTimeMillis());
-            StructureType type = pickEnabledStructureType(r);
+            StructureType type = pickEnabledStructureType(player.getWorld(), r);
             if (type == null) {
                 sender.sendMessage(color("&cNo structures enabled."));
                 return true;
             }
 
-            Location origin = findSurfaceOriginNear(loc, r);
+            Location origin = switch (world.getEnvironment()) {
+                case NETHER -> findNetherOriginInChunk(world, loc.getChunk().getX(), loc.getChunk().getZ(), r);
+                case THE_END -> findEndOriginInChunk(world, loc.getChunk().getX(), loc.getChunk().getZ(), r);
+                default -> findSurfaceOriginNear(loc, r);
+            };
             if (origin == null) {
                 sender.sendMessage(color("&cCould not find a surface origin here."));
                 return true;
@@ -621,7 +744,7 @@ public class WanderLore extends JavaPlugin implements Listener {
             return true;
         }
 
-        sender.sendMessage(color("&7[&bWanderLore&7] &f/wanderlore reload | stats | spawn"));
+        sender.sendMessage(color("&7[&bWanderLore&7] &f/wanderlore reload | stats | spawn | purgeNpcs [world] | purgeAllNpcs"));
         return true;
     }
 
@@ -1333,12 +1456,19 @@ public class WanderLore extends JavaPlugin implements Listener {
     private void tryGenerateStructureInChunk(World world, int chunkX, int chunkZ, Random chunkRandom, String chunkKey) {
         if (!world.isChunkLoaded(chunkX, chunkZ)) return;
 
-        Location origin = findSurfaceOriginInChunk(world, chunkX, chunkZ, chunkRandom);
+        Location origin = switch (world.getEnvironment()) {
+            case NETHER -> findNetherOriginInChunk(world, chunkX, chunkZ, chunkRandom);
+            case THE_END -> findEndOriginInChunk(world, chunkX, chunkZ, chunkRandom);
+            default -> findSurfaceOriginInChunk(world, chunkX, chunkZ, chunkRandom);
+        };
         if (origin == null) return;
 
-        if (origin.getBlockY() < minY || origin.getBlockY() > maxY) return;
+        // Overworld Y range guard (Nether/End origins already bounded)
+        if (world.getEnvironment() == World.Environment.NORMAL) {
+            if (origin.getBlockY() < minY || origin.getBlockY() > maxY) return;
+        }
 
-        StructureType type = pickEnabledStructureType(chunkRandom);
+        StructureType type = pickEnabledStructureType(world, chunkRandom);
         if (type == null) return;
 
         if (!generateStructure(type, origin, chunkRandom)) return;
@@ -1363,7 +1493,9 @@ public class WanderLore extends JavaPlugin implements Listener {
         }
 
         if (integrateCitizens) {
-            if (chunkRandom.nextDouble() <= npcChanceGivenStructure) {
+            if (maxNpcsPerWorld > 0 && countOurNpcEntities(world) >= maxNpcsPerWorld) {
+                if (debugLog) getLogger().info("NPC cap reached in " + world.getName() + " (" + maxNpcsPerWorld + "); skipping NPC spawn.");
+            } else if (chunkRandom.nextDouble() <= npcChanceGivenStructure) {
                 Location npcLoc = origin.clone().add(2, 0, 2);
                 spawnCitizensNpcIfPossible(npcLoc, makeNpcId(world, origin), chunkRandom);
             }
@@ -1390,6 +1522,66 @@ public class WanderLore extends JavaPlugin implements Listener {
         return null;
     }
 
+
+// Dimension-aware origin finders (Nether/End)
+private Location findNetherOriginInChunk(World world, int chunkX, int chunkZ, Random r) {
+    int baseX = chunkX * 16;
+    int baseZ = chunkZ * 16;
+
+    // Pick random columns and scan down from near the ceiling.
+    for (int attempt = 0; attempt < 20; attempt++) {
+        int x = baseX + r.nextInt(16);
+        int z = baseZ + r.nextInt(16);
+
+        // Scan a reasonable vertical range in the Nether (avoid ceiling bedrock edits).
+        for (int y = Math.min(world.getMaxHeight() - 5, 120); y >= 20; y--) {
+            Material below = world.getBlockAt(x, y - 1, z).getType();
+            Material at = world.getBlockAt(x, y, z).getType();
+            Material above = world.getBlockAt(x, y + 1, z).getType();
+
+            if (at != Material.AIR) continue;
+            if (above != Material.AIR) continue;
+            if (below == Material.AIR) continue;
+
+            if (below == Material.LAVA || below == Material.FIRE) continue;
+            if (below == Material.BEDROCK) continue;
+
+            // Don't spawn on soul fire/lava pools
+            if (below == Material.MAGMA_BLOCK) {
+                if (r.nextInt(100) < 60) continue;
+            }
+
+            return new Location(world, x, y, z);
+        }
+    }
+    return null;
+}
+
+private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Random r) {
+    int baseX = chunkX * 16;
+    int baseZ = chunkZ * 16;
+
+    for (int attempt = 0; attempt < 16; attempt++) {
+        int x = baseX + r.nextInt(16);
+        int z = baseZ + r.nextInt(16);
+
+        int y = world.getHighestBlockYAt(x, z);
+        if (y <= 0) continue;
+
+        Material below = world.getBlockAt(x, y - 1, z).getType();
+        if (below == Material.AIR) continue;
+        if (below == Material.WATER || below == Material.LAVA) continue;
+
+        // Prefer End terrain blocks, but allow obsidian platforms, etc.
+        if (below != Material.END_STONE && below != Material.OBSIDIAN && below != Material.CRYING_OBSIDIAN) {
+            if (r.nextInt(100) < 70) continue;
+        }
+
+        return new Location(world, x, y, z);
+    }
+    return null;
+}
+
     private Location findSurfaceOriginNear(Location near, Random r) {
         World world = near.getWorld();
         if (world == null) return null;
@@ -1407,17 +1599,43 @@ public class WanderLore extends JavaPlugin implements Listener {
     }
 
     private boolean generateStructure(StructureType type, Location origin, Random r) {
-        return switch (type) {
-            case RUINED_COTTAGE -> genRuinedCottage(origin, r);
-            case STONE_CIRCLE -> genStoneCircle(origin, r);
-            case SUNKEN_SHRINE -> genSunkenShrine(origin, r);
-            case OBSIDIAN_STEP_PYRAMID -> genObsidianStepPyramid(origin, r);
-            case HANGING_TRIAL -> genHangingTrial(origin, r);
-        };
-    }
+    return switch (type) {
+        // Overworld
+        case RUINED_COTTAGE -> genRuinedCottage(origin, r);
+        case STONE_CIRCLE -> genStoneCircle(origin, r);
+        case SUNKEN_SHRINE -> genSunkenShrine(origin, r);
+        case OBSIDIAN_STEP_PYRAMID -> genObsidianStepPyramid(origin, r);
+        case HANGING_TRIAL -> genHangingTrial(origin, r);
+        case RUINED_WATCHTOWER -> genRuinedWatchtower(origin, r);
+        case BURIED_CRYPT -> genBuriedCrypt(origin, r);
+        case LOST_LIBRARY -> genLostLibrary(origin, r);
 
-    private StructureType pickEnabledStructureType(Random r) {
-        List<String> enabledList = getConfig().getStringList("structures.enabled");
+        // Nether
+        case NETHER_SIGNAL_PYLON -> genNetherSignalPylon(origin, r);
+        case BASALT_ALTAR -> genBasaltAltar(origin, r);
+        case FORGOTTEN_HALL -> genForgottenHall(origin, r);
+
+        // End
+        case ENDER_OBELISK -> genEnderObelisk(origin, r);
+        case VOID_RUIN -> genVoidRuin(origin, r);
+        case CHORUS_MAZE -> genChorusMaze(origin, r);
+    };
+}
+
+
+    private StructureType pickEnabledStructureType(World world, Random r) {
+        World.Environment env = world.getEnvironment();
+        String preferredKey = switch (env) {
+            case NETHER -> "structures.nether.enabled";
+            case THE_END -> "structures.end.enabled";
+            default -> "structures.overworld.enabled";
+        };
+
+        List<String> enabledList = getConfig().getStringList(preferredKey);
+        if (enabledList == null || enabledList.isEmpty()) {
+            // Backward compat
+            enabledList = getConfig().getStringList("structures.enabled");
+        }
         if (enabledList == null || enabledList.isEmpty()) return null;
 
         List<StructureType> candidates = new ArrayList<>();
@@ -1946,6 +2164,43 @@ public class WanderLore extends JavaPlugin implements Listener {
         }
     }
 
+
+private int purgeOwnedNpcs(String worldNameOrNull) {
+    if (!integrateCitizens) return 0;
+
+    Plugin citizensPlugin = Bukkit.getPluginManager().getPlugin("Citizens");
+    if (citizensPlugin == null || !citizensPlugin.isEnabled()) return 0;
+
+    int removed = 0;
+    try {
+        // CitizensAPI is present at compile time via your builder classpath.
+        net.citizensnpcs.api.npc.NPCRegistry reg = net.citizensnpcs.api.CitizensAPI.getNPCRegistry();
+        if (reg == null) return 0;
+
+        for (net.citizensnpcs.api.npc.NPC npc : reg) {
+            if (npc == null) continue;
+            if (!npc.isSpawned()) continue;
+
+            Entity ent = npc.getEntity();
+            if (ent == null) continue;
+
+            if (!ent.hasMetadata(META_WANDERLORE_NPC)) continue;
+
+            if (worldNameOrNull != null) {
+                World w = ent.getWorld();
+                if (w == null) continue;
+                if (!w.getName().equalsIgnoreCase(worldNameOrNull)) continue;
+            }
+
+            npc.destroy();
+            removed++;
+        }
+    } catch (Throwable t) {
+        getLogger().warning("purgeOwnedNpcs failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
+    }
+    return removed;
+}
+
 	private String maybeApplySkinTrait(Object npc, Random r) {
 		try {
 			Class<?> skinTraitClass = Class.forName("net.citizensnpcs.trait.SkinTrait");
@@ -2254,6 +2509,365 @@ public class WanderLore extends JavaPlugin implements Listener {
     // -----------------------------
     // Helpers: build checks + placement
     // -----------------------------
+
+private boolean genRuinedWatchtower(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    if (!ensureBuildableSurface(w, x, y - 1, z, 7, 7, 3)) return false;
+
+    Material wall = r.nextBoolean() ? Material.COBBLESTONE : Material.STONE_BRICKS;
+    Material accent = r.nextBoolean() ? Material.MOSSY_COBBLESTONE : Material.CRACKED_STONE_BRICKS;
+
+    // base pad
+    fillRect(w, x - 3, y - 1, z - 3, 7, 7, wall);
+
+    int height = 10 + r.nextInt(6);
+    for (int yy = 0; yy < height; yy++) {
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dz = -2; dz <= 2; dz++) {
+                int ax = x + dx;
+                int az = z + dz;
+                boolean edge = Math.abs(dx) == 2 || Math.abs(dz) == 2;
+                if (edge) {
+                    setBlockSafe(w, ax, y + yy, az, (r.nextInt(100) < 14) ? accent : wall);
+                } else {
+                    setBlockSafe(w, ax, y + yy, az, Material.AIR);
+                }
+            }
+        }
+    }
+
+    // broken top
+    for (int dx = -2; dx <= 2; dx++) {
+        for (int dz = -2; dz <= 2; dz++) {
+            if (r.nextInt(100) < 35) continue;
+            setBlockSafe(w, x + dx, y + height, z + dz, (Math.abs(dx) == 2 || Math.abs(dz) == 2) ? wall : Material.AIR);
+        }
+    }
+
+    // ladder column + torch
+    for (int yy = 0; yy < height - 1; yy++) {
+        setBlockSafe(w, x, y + yy, z - 1, Material.LADDER);
+    }
+    if (r.nextInt(100) < 70) setBlockSafe(w, x - 1, y + 2, z - 2, Material.TORCH);
+
+    // stash chest
+    if (r.nextInt(100) < 65) {
+        setBlockSafe(w, x + 1, y, z + 1, Material.CHEST);
+        Block cb = w.getBlockAt(x + 1, y, z + 1);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "watchtower"));
+            if (r.nextInt(100) < 20) chest.getBlockInventory().addItem(makeLoreBook(w, r, "tower"));
+        }
+    }
+
+    maybeScatter(w, x, y, z, Material.COBWEB, r, 7);
+    return true;
+}
+
+private boolean genBuriedCrypt(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = Math.max(w.getMinHeight() + 10, origin.getBlockY() - (6 + r.nextInt(5)));
+    int z = origin.getBlockZ();
+
+    if (!w.isChunkLoaded(x >> 4, z >> 4)) return false;
+
+    // dig a small chamber
+    int rx = 4, rz = 4, ry = 4;
+    for (int dx = -rx; dx <= rx; dx++) {
+        for (int dz = -rz; dz <= rz; dz++) {
+            for (int dy = -1; dy <= ry; dy++) {
+                boolean wall = (Math.abs(dx) == rx || Math.abs(dz) == rz || dy == -1 || dy == ry);
+                setBlockSafe(w, x + dx, y + dy, z + dz, wall ? Material.DEEPSLATE_BRICKS : Material.AIR);
+            }
+        }
+    }
+
+    // entrance shaft (subtle)
+    for (int dy = 0; dy < 6; dy++) {
+        setBlockSafe(w, x, origin.getBlockY() - dy, z, Material.AIR);
+    }
+    setBlockSafe(w, x, origin.getBlockY() - 6, z, Material.LADDER);
+    setBlockSafe(w, x, origin.getBlockY() - 7, z, Material.LADDER);
+
+    // sarcophagus
+    fillRect(w, x - 1, y, z - 1, 3, 3, Material.POLISHED_DEEPSLATE);
+    setBlockSafe(w, x, y + 1, z, Material.COBWEB);
+
+    if (r.nextInt(100) < 60) {
+        setBlockSafe(w, x + 2, y, z + 2, Material.CHEST);
+        Block cb = w.getBlockAt(x + 2, y, z + 2);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "crypt"));
+            if (r.nextInt(100) < 35) chest.getBlockInventory().addItem(new ItemStack(Material.GOLD_NUGGET, 3 + r.nextInt(9)));
+            if (r.nextInt(100) < 18) chest.getBlockInventory().addItem(makeLoreBook(w, r, "crypt"));
+        }
+    }
+
+    // very rare spawner (kept mild)
+    if (r.nextInt(100) < 8) {
+        setBlockSafe(w, x - 2, y, z - 2, Material.SPAWNER);
+    }
+
+    return true;
+}
+
+private boolean genLostLibrary(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    if (!ensureBuildableSurface(w, x, y - 1, z, 9, 9, 3)) return false;
+
+    // footprint 9x7
+    Material base = Material.STONE_BRICKS;
+    Material wall = r.nextBoolean() ? Material.SPRUCE_PLANKS : Material.DARK_OAK_PLANKS;
+
+    fillRect(w, x - 4, y - 1, z - 3, 9, 7, base);
+
+    // walls
+    for (int dy = 0; dy <= 4; dy++) {
+        for (int dx = -4; dx <= 4; dx++) {
+            for (int dz = -3; dz <= 3; dz++) {
+                boolean edge = (Math.abs(dx) == 4 || Math.abs(dz) == 3);
+                if (!edge) continue;
+                if (dy == 1 && dz == 3 && (dx == 0 || dx == 1)) continue; // doorway
+                setBlockSafe(w, x + dx, y + dy, z + dz, wall);
+            }
+        }
+    }
+    // hollow inside
+    for (int dx = -3; dx <= 3; dx++) {
+        for (int dz = -2; dz <= 2; dz++) {
+            for (int dy = 0; dy <= 4; dy++) {
+                setBlockSafe(w, x + dx, y + dy, z + dz, Material.AIR);
+            }
+        }
+    }
+
+    // roof
+    fillRect(w, x - 4, y + 5, z - 3, 9, 7, Material.DARK_OAK_SLAB);
+
+    // shelves + lectern
+    for (int dx = -3; dx <= 3; dx++) {
+        setBlockSafe(w, x + dx, y, z - 2, Material.BOOKSHELF);
+        setBlockSafe(w, x + dx, y, z + 2, Material.BOOKSHELF);
+    }
+    setBlockSafe(w, x, y, z, Material.LECTERN);
+    if (r.nextInt(100) < 65) {
+        setBlockSafe(w, x + 2, y, z, Material.CHEST);
+        Block cb = w.getBlockAt(x + 2, y, z);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeLoreBook(w, r, "library"));
+            chest.getBlockInventory().addItem(makeScrapNote(r, "library"));
+            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.MAP, 1));
+        }
+    }
+
+    return true;
+}
+
+// Nether structures
+private boolean genNetherSignalPylon(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    Material pillar = Material.OBSIDIAN;
+    for (int i = 0; i < 12 + r.nextInt(10); i++) {
+        setBlockSafe(w, x, y + i, z, pillar);
+        if (i % 3 == 0) {
+            setBlockSafe(w, x + 1, y + i, z, Material.CRYING_OBSIDIAN);
+            setBlockSafe(w, x - 1, y + i, z, Material.CRYING_OBSIDIAN);
+        }
+    }
+    setBlockSafe(w, x, y + 14, z, Material.END_ROD);
+
+    // small altar base
+    fillRect(w, x - 2, y - 1, z - 2, 5, 5, Material.BLACKSTONE);
+    if (r.nextInt(100) < 55) {
+        setBlockSafe(w, x + 1, y, z + 1, Material.CHEST);
+        Block cb = w.getBlockAt(x + 1, y, z + 1);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "pylon"));
+            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.GLOWSTONE_DUST, 4 + r.nextInt(6)));
+        }
+    }
+    return true;
+}
+
+private boolean genBasaltAltar(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    fillRect(w, x - 3, y - 1, z - 3, 7, 7, Material.BASALT);
+    fillRect(w, x - 2, y, z - 2, 5, 5, Material.POLISHED_BASALT);
+    setBlockSafe(w, x, y, z, Material.SOUL_FIRE);
+
+    if (r.nextInt(100) < 35) setBlockSafe(w, x, y + 1, z, Material.IRON_BARS);
+
+    if (r.nextInt(100) < 50) {
+        setBlockSafe(w, x + 2, y, z - 2, Material.CHEST);
+        Block cb = w.getBlockAt(x + 2, y, z - 2);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "altar"));
+            if (r.nextInt(100) < 22) chest.getBlockInventory().addItem(new ItemStack(Material.ENDER_PEARL, 1));
+        }
+    }
+
+    return true;
+}
+
+private boolean genForgottenHall(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    int length = 10 + r.nextInt(9);
+    for (int i = 0; i < length; i++) {
+        int zz = z + i;
+        for (int dx = -2; dx <= 2; dx++) {
+            for (int dy = -1; dy <= 3; dy++) {
+                boolean wall = (Math.abs(dx) == 2 || dy == -1 || dy == 3);
+                setBlockSafe(w, x + dx, y + dy, zz, wall ? Material.POLISHED_BLACKSTONE_BRICKS : Material.AIR);
+            }
+        }
+        if (i % 4 == 0) {
+            setBlockSafe(w, x - 1, y + 1, zz, Material.SOUL_LANTERN);
+            setBlockSafe(w, x + 1, y + 1, zz, Material.SOUL_LANTERN);
+        }
+    }
+    if (r.nextInt(100) < 60) {
+        setBlockSafe(w, x, y, z + length - 2, Material.CHEST);
+        Block cb = w.getBlockAt(x, y, z + length - 2);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "hall"));
+            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.GOLD_NUGGET, 6 + r.nextInt(10)));
+        }
+    }
+    return true;
+}
+
+// End structures
+private boolean genEnderObelisk(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    fillRect(w, x - 2, y - 1, z - 2, 5, 5, Material.END_STONE_BRICKS);
+    for (int i = 0; i < 9 + r.nextInt(6); i++) {
+        setBlockSafe(w, x, y + i, z, Material.OBSIDIAN);
+        if (i % 2 == 0 && r.nextInt(100) < 60) {
+            setBlockSafe(w, x + 1, y + i, z, Material.PURPUR_PILLAR);
+        }
+    }
+    setBlockSafe(w, x, y + 10, z, Material.END_ROD);
+
+    if (r.nextInt(100) < 55) {
+        setBlockSafe(w, x - 1, y, z - 1, Material.CHEST);
+        Block cb = w.getBlockAt(x - 1, y, z - 1);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "obelisk"));
+            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.ENDER_PEARL, 1 + r.nextInt(2)));
+        }
+    }
+    return true;
+}
+
+private boolean genVoidRuin(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    Material base = (r.nextInt(100) < 70) ? Material.END_STONE : Material.PURPUR_BLOCK;
+    for (int dx = -5; dx <= 5; dx++) {
+        for (int dz = -5; dz <= 5; dz++) {
+            if (r.nextInt(100) < 35) continue;
+            setBlockSafe(w, x + dx, y - 1, z + dz, base);
+            if (r.nextInt(100) < 10) setBlockSafe(w, x + dx, y, z + dz, Material.END_ROD);
+        }
+    }
+    if (r.nextInt(100) < 40) {
+        setBlockSafe(w, x, y, z, Material.CHEST);
+        Block cb = w.getBlockAt(x, y, z);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "void"));
+            if (r.nextInt(100) < 22) chest.getBlockInventory().addItem(new ItemStack(Material.CHORUS_FRUIT, 1 + r.nextInt(3)));
+        }
+    }
+    return true;
+}
+
+private boolean genChorusMaze(Location origin, Random r) {
+    World w = origin.getWorld();
+    if (w == null) return false;
+
+    int x = origin.getBlockX();
+    int y = origin.getBlockY();
+    int z = origin.getBlockZ();
+
+    int size = 9;
+    for (int dx = -size; dx <= size; dx++) {
+        for (int dz = -size; dz <= size; dz++) {
+            if (Math.abs(dx) == size || Math.abs(dz) == size || (r.nextInt(100) < 18 && (Math.abs(dx) % 2 == 0 || Math.abs(dz) % 2 == 0))) {
+                setBlockSafe(w, x + dx, y, z + dz, Material.PURPUR_BLOCK);
+                if (r.nextInt(100) < 7) setBlockSafe(w, x + dx, y + 1, z + dz, Material.END_ROD);
+            } else {
+                setBlockSafe(w, x + dx, y, z + dz, Material.AIR);
+            }
+        }
+    }
+    // chorus in the middle
+    setBlockSafe(w, x, y, z, Material.CHORUS_PLANT);
+    if (r.nextInt(100) < 50) setBlockSafe(w, x, y + 1, z, Material.CHORUS_FLOWER);
+
+    if (r.nextInt(100) < 40) {
+        setBlockSafe(w, x + 2, y, z + 2, Material.CHEST);
+        Block cb = w.getBlockAt(x + 2, y, z + 2);
+        if (cb.getState() instanceof Chest chest) {
+            chest.getBlockInventory().clear();
+            chest.getBlockInventory().addItem(makeScrapNote(r, "maze"));
+            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.ENDER_PEARL, 1));
+        }
+    }
+
+    return true;
+}
     private boolean ensureBuildableSurface(World w, int centerX, int centerY, int centerZ, int widthX, int widthZ, int maxHeightDelta) {
         int startX = centerX - (widthX / 2);
         int startZ = centerZ - (widthZ / 2);
@@ -2278,7 +2892,27 @@ public class WanderLore extends JavaPlugin implements Listener {
                 setBlockSafe(w, x + dx, y, z + dz, mat);
             }
         }
+
+
     }
+
+    private void maybeScatter(World w, int centerX, int centerY, int centerZ, Material mat, Random r, int attempts) {
+    if (w == null || mat == null || r == null) return;
+    for (int i = 0; i < attempts; i++) {
+        int x = centerX + (r.nextInt(9) - 4);
+        int y = centerY + (r.nextInt(5) - 2);
+        int z = centerZ + (r.nextInt(9) - 4);
+
+        if (!w.isChunkLoaded(x >> 4, z >> 4)) continue;
+
+        Material at = w.getBlockAt(x, y, z).getType();
+        Material below = w.getBlockAt(x, y - 1, z).getType();
+        if (at != Material.AIR) continue;
+        if (below == Material.AIR || below == Material.WATER || below == Material.LAVA) continue;
+
+        setBlockSafe(w, x, y, z, mat);
+    }
+}
 
     private void hollowBox(World w, int x, int y, int z, int sx, int sy, int sz, Material mat) {
         for (int dx = 0; dx < sx; dx++) {
@@ -2466,10 +3100,24 @@ public class WanderLore extends JavaPlugin implements Listener {
     }
 
     private enum StructureType {
+        // Overworld
         RUINED_COTTAGE,
         STONE_CIRCLE,
         SUNKEN_SHRINE,
         OBSIDIAN_STEP_PYRAMID,
-        HANGING_TRIAL
+        HANGING_TRIAL,
+        RUINED_WATCHTOWER,
+        BURIED_CRYPT,
+        LOST_LIBRARY,
+
+        // Nether
+        NETHER_SIGNAL_PYLON,
+        BASALT_ALTAR,
+        FORGOTTEN_HALL,
+
+        // End
+        ENDER_OBELISK,
+        VOID_RUIN,
+        CHORUS_MAZE
     }
 }

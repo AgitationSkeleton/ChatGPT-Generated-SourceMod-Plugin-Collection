@@ -1780,6 +1780,17 @@ private void handleTamedBehavior(NPC npc, LivingEntity living, MercMode mode) {
         }
     }
 
+    private void handleDefendMode(NPC npc, LivingEntity living, Player owner) {
+        // DEFEND = stand still; combat targeting handled elsewhere.
+        try {
+            Navigator nav = npc.getNavigator();
+            if (nav != null && nav.isNavigating()) {
+                try { nav.cancelNavigation(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
+    }
+
+
     private void teleportFollowersToOwnerIfNeeded(Player owner) {
         UUID ownerUuid = owner.getUniqueId();
         String ownerBase = worldBaseName(owner.getWorld().getName());
@@ -3629,4 +3640,10 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
         if (worldName.endsWith("_the_end")) return worldName.substring(0, worldName.length() - "_the_end".length());
         return worldName;
     }
+
+    private boolean sameWorldGroup(String worldA, String worldB) {
+        if (worldA == null || worldB == null) return false;
+        return worldBaseName(worldA).equalsIgnoreCase(worldBaseName(worldB));
+    }
+
 }

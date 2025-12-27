@@ -1,6 +1,6 @@
 name: WanderLore
 main: com.redchanit.wanderlore.WanderLore
-version: 1.1
+version: 1.2
 api-version: 1.21
 author: ChatGPT
 description: Rare worldgen oddities + cryptic nonlinear lore + alive-world ambience + (optional) Citizens/Dynmap NPC encounters.
@@ -10,7 +10,7 @@ softdepend:
 commands:
   wanderlore:
     description: Admin and debug commands for WanderLore.
-    usage: /<command> reload | stats | spawn
+    usage: /<command> reload | stats | spawn | purgeNpcs [world] | purgeAllNpcs
 permissions:
   wanderlore.admin:
     description: Allows /wanderlore reload and /wanderlore spawn

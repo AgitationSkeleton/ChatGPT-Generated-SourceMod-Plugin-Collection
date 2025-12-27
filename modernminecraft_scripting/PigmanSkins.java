@@ -3,6 +3,7 @@ package com.redchanit.pigmanskins;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -40,6 +41,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
     private final Random rng = new Random();
 
     private NamespacedKey disguiseAppliedKey;
+    private NamespacedKey disguiseCheckedKey;
 
     private File configFile;
     private FileConfiguration config;
@@ -61,12 +63,16 @@ public class PigmanSkins extends JavaPlugin implements Listener {
     private Method watcherSetItemInHandMethod;  // fallback name
     private int mirrorTaskId = -1;
 
+    // Ambient sound emitter task
+    private int ambientSoundTaskId = -1;
+
     private final Set<UUID> trackedEntities = new HashSet<>();
     private final Map<UUID, ItemSignature> lastMainHandSignature = new HashMap<>();
 
     @Override
     public void onEnable() {
         disguiseAppliedKey = new NamespacedKey(this, "disguiseApplied");
+        disguiseCheckedKey = new NamespacedKey(this, "disguiseChecked");
 
         loadOrCreateConfig();
 
@@ -80,6 +86,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         }
 
         startMirrorTaskIfEnabled();
+        startAmbientSoundTaskIfEnabled();
 
         getLogger().info("Enabled with LibsDisguises support. Watching Nether piglins for disguise chances.");
     }
@@ -89,6 +96,10 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         if (mirrorTaskId != -1) {
             Bukkit.getScheduler().cancelTask(mirrorTaskId);
             mirrorTaskId = -1;
+        }
+        if (ambientSoundTaskId != -1) {
+            Bukkit.getScheduler().cancelTask(ambientSoundTaskId);
+            ambientSoundTaskId = -1;
         }
         trackedEntities.clear();
         lastMainHandSignature.clear();
@@ -110,6 +121,16 @@ public class PigmanSkins extends JavaPlugin implements Listener {
 
         setDefaultIfMissing("mirror.enabled", true);
         setDefaultIfMissing("mirror.intervalTicks", 10);
+
+        // NEW: ambient sound emitter
+        setDefaultIfMissing("sounds.enabled", true);
+        setDefaultIfMissing("sounds.ambient.enabled", true);
+        setDefaultIfMissing("sounds.ambient.intervalTicks", 40);   // how often we consider playing ambient (2s)
+        setDefaultIfMissing("sounds.ambient.chancePercent", 12);   // per-interval chance per entity
+        setDefaultIfMissing("sounds.ambient.radius", 24);          // players within this radius hear it
+        setDefaultIfMissing("sounds.ambient.volume", 1.0);
+        setDefaultIfMissing("sounds.ambient.pitchMin", 0.9);
+        setDefaultIfMissing("sounds.ambient.pitchMax", 1.1);
 
         setDefaultIfMissing("piglin.enabled", true);
         setDefaultIfMissing("piglin.chancePercent", 35);
@@ -175,7 +196,6 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                     }
                 }
             }
-            // Not fatal if missing; mirroring will simply not run.
 
             // PlayerDisguise#setSkin(String)
             try {
@@ -191,7 +211,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 setNameVisibleMethod = null;
             }
 
-            // Prepare watcher reflection (Disguise.getWatcher().setItemInMainHand(ItemStack))
+            // Prepare watcher reflection lazily
             disguiseGetWatcherMethod = null;
             watcherSetMainHandMethod = null;
             watcherSetItemInHandMethod = null;
@@ -230,28 +250,32 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 return;
             }
 
-            // Iterate a snapshot to avoid concurrent modification if entities get added during loop
             UUID[] entityIds = trackedEntities.toArray(new UUID[0]);
 
-            for (UUID uuid : entityIds) {
-                Entity entity = Bukkit.getEntity(uuid);
+            for (UUID entityId : entityIds) {
+                Entity entity = Bukkit.getEntity(entityId);
                 if (!(entity instanceof LivingEntity living) || entity.isDead() || !entity.isValid()) {
-                    trackedEntities.remove(uuid);
-                    lastMainHandSignature.remove(uuid);
+                    trackedEntities.remove(entityId);
+                    lastMainHandSignature.remove(entityId);
                     continue;
                 }
 
                 if (config.getBoolean("general.onlyNether", true)) {
                     if (living.getWorld().getEnvironment() != World.Environment.NETHER) {
-                        // If entity moved worlds (unlikely), stop tracking
-                        trackedEntities.remove(uuid);
-                        lastMainHandSignature.remove(uuid);
+                        trackedEntities.remove(entityId);
+                        lastMainHandSignature.remove(entityId);
                         continue;
                     }
                 }
 
+                // Only mirror for entities we actually disguised (applied=1)
+                if (!hasByteFlag(living, disguiseAppliedKey, (byte) 1)) {
+                    trackedEntities.remove(entityId);
+                    lastMainHandSignature.remove(entityId);
+                    continue;
+                }
+
                 if (!isEntityDisguised(living)) {
-                    // Still track it (chunk-load handler will reapply), but no watcher updates now
                     continue;
                 }
 
@@ -263,16 +287,101 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 ItemStack mainHand = equipment.getItemInMainHand();
                 ItemSignature signatureNow = ItemSignature.fromItem(mainHand);
 
-                ItemSignature signaturePrev = lastMainHandSignature.get(uuid);
+                ItemSignature signaturePrev = lastMainHandSignature.get(entityId);
                 if (signatureNow.equals(signaturePrev)) {
-                    continue; // no change; do nothing
+                    continue;
                 }
 
                 if (mirrorDisguiseMainHand(living, mainHand)) {
-                    lastMainHandSignature.put(uuid, signatureNow);
+                    lastMainHandSignature.put(entityId, signatureNow);
                 }
             }
 
+        }, intervalTicks, intervalTicks);
+    }
+
+    private void startAmbientSoundTaskIfEnabled() {
+        if (!config.getBoolean("sounds.enabled", true)) {
+            return;
+        }
+        if (!config.getBoolean("sounds.ambient.enabled", true)) {
+            return;
+        }
+
+        int intervalTicks = Math.max(1, config.getInt("sounds.ambient.intervalTicks", 40));
+        int chancePercent = clampPercent(config.getInt("sounds.ambient.chancePercent", 12));
+        double radius = Math.max(1.0, config.getDouble("sounds.ambient.radius", 24.0));
+        float volume = (float) Math.max(0.0, config.getDouble("sounds.ambient.volume", 1.0));
+        double pitchMin = config.getDouble("sounds.ambient.pitchMin", 0.9);
+        double pitchMax = config.getDouble("sounds.ambient.pitchMax", 1.1);
+        if (pitchMax < pitchMin) {
+            double temp = pitchMin;
+            pitchMin = pitchMax;
+            pitchMax = temp;
+        }
+
+        final double radiusSquared = radius * radius;
+        final double pitchMinFinal = pitchMin;
+        final double pitchMaxFinal = pitchMax;
+        final int chanceFinal = chancePercent;
+
+        ambientSoundTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
+            if (trackedEntities.isEmpty()) {
+                return;
+            }
+
+            UUID[] entityIds = trackedEntities.toArray(new UUID[0]);
+
+            for (UUID entityId : entityIds) {
+                Entity entity = Bukkit.getEntity(entityId);
+                if (!(entity instanceof LivingEntity living) || entity.isDead() || !entity.isValid()) {
+                    continue;
+                }
+
+                if (!hasByteFlag(living, disguiseAppliedKey, (byte) 1)) {
+                    continue;
+                }
+
+                // Only worry about these mobs
+                EntityType type = living.getType();
+                if (type != EntityType.PIGLIN && type != EntityType.ZOMBIFIED_PIGLIN && type != EntityType.PIGLIN_BRUTE) {
+                    continue;
+                }
+
+                if (config.getBoolean("general.onlyNether", true)) {
+                    if (living.getWorld().getEnvironment() != World.Environment.NETHER) {
+                        continue;
+                    }
+                }
+
+                // Chance roll per interval per entity
+                if (chanceFinal < 100) {
+                    int roll = rng.nextInt(100) + 1;
+                    if (roll > chanceFinal) {
+                        continue;
+                    }
+                }
+
+                Sound ambientSound = switch (type) {
+                    case ZOMBIFIED_PIGLIN -> Sound.ENTITY_ZOMBIFIED_PIGLIN_AMBIENT;
+                    case PIGLIN -> Sound.ENTITY_PIGLIN_AMBIENT;
+                    case PIGLIN_BRUTE -> Sound.ENTITY_PIGLIN_BRUTE_AMBIENT;
+                    default -> null;
+                };
+
+                if (ambientSound == null) {
+                    continue;
+                }
+
+                float pitch = (float) (pitchMinFinal + (rng.nextDouble() * (pitchMaxFinal - pitchMinFinal)));
+
+                // Play to nearby players only (so we don't broadcast globally)
+                for (var player : living.getWorld().getPlayers()) {
+                    if (player.getLocation().distanceSquared(living.getLocation()) <= radiusSquared) {
+                        player.playSound(living.getLocation(), ambientSound, volume, pitch);
+                    }
+                }
+            }
         }, intervalTicks, intervalTicks);
     }
 
@@ -301,12 +410,12 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         }
 
         if (type == EntityType.PIGLIN) {
-            maybeDisguise(entity, "piglin");
+            maybeDisguiseAndMarkChecked(entity, "piglin");
         } else if (type == EntityType.ZOMBIFIED_PIGLIN) {
-            maybeDisguise(entity, "zombifiedPiglin");
+            maybeDisguiseAndMarkChecked(entity, "zombifiedPiglin");
             maybeForceGoldSword(entity, "zombifiedPiglin.forceGoldSword");
         } else if (type == EntityType.PIGLIN_BRUTE) {
-            maybeDisguise(entity, "piglinBrute");
+            maybeDisguiseAndMarkChecked(entity, "piglinBrute");
             maybeForceGoldSword(entity, "piglinBrute.forceGoldSword");
         }
     }
@@ -330,32 +439,47 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 continue;
             }
 
-            PersistentDataContainer data = entity.getPersistentDataContainer();
-            boolean wasApplied = data.has(disguiseAppliedKey, PersistentDataType.BYTE)
-                    && data.get(disguiseAppliedKey, PersistentDataType.BYTE) != null
-                    && data.get(disguiseAppliedKey, PersistentDataType.BYTE) == (byte) 1;
-
-            if (!wasApplied) {
+            EntityType type = entity.getType();
+            if (type != EntityType.PIGLIN && type != EntityType.ZOMBIFIED_PIGLIN && type != EntityType.PIGLIN_BRUTE) {
                 continue;
             }
 
-            // Track it for mirroring (safe even if mirroring disabled; loop is cheap)
-            trackedEntities.add(entity.getUniqueId());
+            if ((type == EntityType.PIGLIN || type == EntityType.ZOMBIFIED_PIGLIN) && isBaby(entity)) {
+                continue;
+            }
 
-            if (!isEntityDisguised(entity)) {
-                EntityType type = entity.getType();
+            // If we've already applied disguise before, ensure it's still active
+            if (hasByteFlag(entity, disguiseAppliedKey, (byte) 1)) {
+                trackedEntities.add(entity.getUniqueId());
 
-                if ((type == EntityType.PIGLIN || type == EntityType.ZOMBIFIED_PIGLIN) && isBaby(entity)) {
-                    continue;
+                if (!isEntityDisguised(entity)) {
+                    if (type == EntityType.PIGLIN) {
+                        forceDisguise(entity, "piglin");
+                    } else if (type == EntityType.ZOMBIFIED_PIGLIN) {
+                        forceDisguise(entity, "zombifiedPiglin");
+                        maybeForceGoldSword(entity, "zombifiedPiglin.forceGoldSword");
+                    } else if (type == EntityType.PIGLIN_BRUTE) {
+                        forceDisguise(entity, "piglinBrute");
+                        maybeForceGoldSword(entity, "piglinBrute.forceGoldSword");
+                    }
                 }
 
-                if (type == EntityType.PIGLIN) {
-                    forceDisguise(entity, "piglin");
-                } else if (type == EntityType.ZOMBIFIED_PIGLIN) {
-                    forceDisguise(entity, "zombifiedPiglin");
-                } else if (type == EntityType.PIGLIN_BRUTE) {
-                    forceDisguise(entity, "piglinBrute");
-                }
+                continue;
+            }
+
+            // Catch existing mobs once, roll chance once, then mark checked
+            if (hasByteFlag(entity, disguiseCheckedKey, (byte) 1)) {
+                continue;
+            }
+
+            if (type == EntityType.PIGLIN) {
+                maybeDisguiseAndMarkChecked(entity, "piglin");
+            } else if (type == EntityType.ZOMBIFIED_PIGLIN) {
+                maybeDisguiseAndMarkChecked(entity, "zombifiedPiglin");
+                maybeForceGoldSword(entity, "zombifiedPiglin.forceGoldSword");
+            } else if (type == EntityType.PIGLIN_BRUTE) {
+                maybeDisguiseAndMarkChecked(entity, "piglinBrute");
+                maybeForceGoldSword(entity, "piglinBrute.forceGoldSword");
             }
         }
     }
@@ -367,7 +491,10 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         return false;
     }
 
-    private void maybeDisguise(Entity entity, String section) {
+    private void maybeDisguiseAndMarkChecked(Entity entity, String section) {
+        // Mark checked regardless of outcome
+        setByteFlag(entity, disguiseCheckedKey, (byte) 1);
+
         if (!config.getBoolean(section + ".enabled", true)) {
             return;
         }
@@ -378,7 +505,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         }
 
         if (chance < 100) {
-            int roll = rng.nextInt(100) + 1; // 1..100
+            int roll = rng.nextInt(100) + 1;
             if (roll > chance) {
                 return;
             }
@@ -411,24 +538,16 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 }
             }
 
-            try {
-                entity.setCustomName(null);
-            } catch (Throwable ignored) {
-                // ignore
-            }
-            try {
-                entity.setCustomNameVisible(false);
-            } catch (Throwable ignored) {
-                // ignore
-            }
+            try { entity.setCustomName(null); } catch (Throwable ignored) {}
+            try { entity.setCustomNameVisible(false); } catch (Throwable ignored) {}
 
             disguiseToAllMethod.invoke(null, entity, disguise);
 
-            entity.getPersistentDataContainer().set(disguiseAppliedKey, PersistentDataType.BYTE, (byte) 1);
+            setByteFlag(entity, disguiseAppliedKey, (byte) 1);
+            setByteFlag(entity, disguiseCheckedKey, (byte) 1);
 
-            // Track for mirroring
             trackedEntities.add(entity.getUniqueId());
-            lastMainHandSignature.remove(entity.getUniqueId()); // force initial sync
+            lastMainHandSignature.remove(entity.getUniqueId());
 
         } catch (Throwable t) {
             getLogger().warning("Failed to apply disguise: " + t.getClass().getSimpleName() + ": " + t.getMessage());
@@ -441,9 +560,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
             if (result instanceof Boolean boolVal) {
                 return boolVal;
             }
-        } catch (Throwable ignored) {
-            // ignore
-        }
+        } catch (Throwable ignored) {}
         return false;
     }
 
@@ -452,16 +569,11 @@ public class PigmanSkins extends JavaPlugin implements Listener {
             return;
         }
 
-        PersistentDataContainer data = entity.getPersistentDataContainer();
-        boolean wasApplied = data.has(disguiseAppliedKey, PersistentDataType.BYTE)
-                && data.get(disguiseAppliedKey, PersistentDataType.BYTE) != null
-                && data.get(disguiseAppliedKey, PersistentDataType.BYTE) == (byte) 1;
-
-        if (!wasApplied) {
+        if (!(entity instanceof LivingEntity living)) {
             return;
         }
 
-        if (!(entity instanceof LivingEntity living)) {
+        if (!hasByteFlag(living, disguiseAppliedKey, (byte) 1)) {
             return;
         }
 
@@ -471,7 +583,7 @@ public class PigmanSkins extends JavaPlugin implements Listener {
         }
 
         equipment.setItemInMainHand(new ItemStack(Material.GOLDEN_SWORD, 1));
-        lastMainHandSignature.remove(entity.getUniqueId()); // force sync after we change it
+        lastMainHandSignature.remove(entity.getUniqueId());
     }
 
     private boolean mirrorDisguiseMainHand(Entity entity, ItemStack mainHand) {
@@ -481,7 +593,6 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 return false;
             }
 
-            // Resolve Disguise#getWatcher and watcher methods lazily (once)
             if (disguiseGetWatcherMethod == null) {
                 disguiseGetWatcherMethod = disguise.getClass().getMethod("getWatcher");
             }
@@ -491,7 +602,6 @@ public class PigmanSkins extends JavaPlugin implements Listener {
             }
 
             if (watcherSetMainHandMethod == null && watcherSetItemInHandMethod == null) {
-                // Try common watcher method names
                 watcherSetMainHandMethod = findFirstMethod(watcher.getClass(),
                         new String[]{"setItemInMainHand", "setMainHand"},
                         ItemStack.class);
@@ -512,12 +622,20 @@ public class PigmanSkins extends JavaPlugin implements Listener {
                 return true;
             }
 
-            // If neither exists, we can't mirror on this LD build
             return false;
-
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private boolean hasByteFlag(Entity entity, NamespacedKey key, byte expected) {
+        PersistentDataContainer data = entity.getPersistentDataContainer();
+        Byte val = data.get(key, PersistentDataType.BYTE);
+        return val != null && val == expected;
+    }
+
+    private void setByteFlag(Entity entity, NamespacedKey key, byte value) {
+        entity.getPersistentDataContainer().set(key, PersistentDataType.BYTE, value);
     }
 
     private int clampPercent(int value) {
