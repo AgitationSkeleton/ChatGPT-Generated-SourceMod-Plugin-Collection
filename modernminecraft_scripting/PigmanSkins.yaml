@@ -1,0 +1,7 @@
+name: PigmanSkins
+main: com.redchanit.pigmanskins.PigmanSkins
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Randomly disguises Nether piglins as player-skin pigmen (MHF/XaPhobia) with hidden nameplates.
+softdepend: [LibsDisguises, ProtocolLib]

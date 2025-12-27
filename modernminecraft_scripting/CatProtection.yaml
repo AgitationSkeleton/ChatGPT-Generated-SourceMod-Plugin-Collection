@@ -1,0 +1,5 @@
+name: CatProtection
+version: 1.0
+main: com.example.catprotection.CatProtection
+api-version: 1.21
+description: A plugin to make all cats impervious to damage.

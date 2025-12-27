@@ -1,17 +1,17 @@
 name: ViridianTownsFolk
 main: com.redchanit.viridiantownsfolk.ViridianTownsFolk
-version: 2.0
+version: 2.0-reset
 api-version: "1.21"
-description: Spawns and animates Citizens NPC townsfolk around Viridian sites with lightweight routines and dialogue. (No Dynmap)
+description: Crash-safe Citizens townsfolk spawner around dynmap marker sites (reads markers.yml only). Configurable ignore list.
 author: ChatGPT
 softdepend: [Citizens]
 commands:
   vtf:
     description: ViridianTownsFolk control commands
-    usage: /vtf <rehook|adoptall|topup|purge|stats>
+    usage: /vtf <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig>
   viridiantownsfolk:
     description: Alias for /vtf
-    usage: /viridiantownsfolk <rehook|adoptall|topup|purge|stats>
+    usage: /viridiantownsfolk <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig>
 permissions:
   vtf.admin:
     description: Allows ViridianTownsFolk admin commands

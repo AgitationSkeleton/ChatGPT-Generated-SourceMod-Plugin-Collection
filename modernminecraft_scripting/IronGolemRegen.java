@@ -7,10 +7,11 @@ import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.file.YamlConfiguration;
-import org.bukkit.entity.Entity;
 import org.bukkit.entity.IronGolem;
-import org.bukkit.entity.Snowman;
 import org.bukkit.entity.LivingEntity;
+import org.bukkit.entity.Snowman;
+import org.bukkit.entity.Villager;
+import org.bukkit.entity.WanderingTrader;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageEvent;
@@ -28,8 +29,11 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
     private final Map<UUID, Long> lastDamageMillisByEntity = new ConcurrentHashMap<>();
 
     private boolean enabled;
+
     private boolean healIronGolems;
     private boolean healSnowGolems;
+    private boolean healVillagers;
+    private boolean healWanderingTraders;
 
     private double healAmount;
     private long healIntervalTicks;
@@ -62,9 +66,17 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
 
     @EventHandler
     public void onEntityDamage(EntityDamageEvent event) {
-        Entity entity = event.getEntity();
-        if (!(entity instanceof IronGolem) && !(entity instanceof Snowman)) return;
-        lastDamageMillisByEntity.put(entity.getUniqueId(), System.currentTimeMillis());
+        LivingEntity living = (event.getEntity() instanceof LivingEntity) ? (LivingEntity) event.getEntity() : null;
+        if (living == null) return;
+
+        if (!(living instanceof IronGolem)
+                && !(living instanceof Snowman)
+                && !(living instanceof Villager)
+                && !(living instanceof WanderingTrader)) {
+            return;
+        }
+
+        lastDamageMillisByEntity.put(living.getUniqueId(), System.currentTimeMillis());
     }
 
     @Override
@@ -99,14 +111,26 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
             for (World world : Bukkit.getWorlds()) {
 
                 if (healIronGolems) {
-                    for (IronGolem golem : world.getEntitiesByClass(IronGolem.class)) {
-                        healIfEligible(golem, now);
+                    for (IronGolem entity : world.getEntitiesByClass(IronGolem.class)) {
+                        healIfEligible(entity, now);
                     }
                 }
 
                 if (healSnowGolems) {
-                    for (Snowman snowGolem : world.getEntitiesByClass(Snowman.class)) {
-                        healIfEligible(snowGolem, now);
+                    for (Snowman entity : world.getEntitiesByClass(Snowman.class)) {
+                        healIfEligible(entity, now);
+                    }
+                }
+
+                if (healVillagers) {
+                    for (Villager entity : world.getEntitiesByClass(Villager.class)) {
+                        healIfEligible(entity, now);
+                    }
+                }
+
+                if (healWanderingTraders) {
+                    for (WanderingTrader entity : world.getEntitiesByClass(WanderingTrader.class)) {
+                        healIfEligible(entity, now);
                     }
                 }
             }
@@ -114,14 +138,18 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
 
         getLogger().info("Healing task started. IntervalTicks=" + healIntervalTicks
                 + ", healAmount=" + healAmount
-                + ", healIronGolems=" + healIronGolems
-                + ", healSnowGolems=" + healSnowGolems);
+                + ", iron=" + healIronGolems
+                + ", snow=" + healSnowGolems
+                + ", villagers=" + healVillagers
+                + ", traders=" + healWanderingTraders);
     }
 
     private void healIfEligible(LivingEntity living, long nowMillis) {
         if (living == null || living.isDead() || !living.isValid()) return;
 
         double maxHealth = getMaxHealth(living);
+        if (maxHealth <= 0.0) return;
+
         double currentHealth = living.getHealth();
         if (currentHealth >= maxHealth) return;
 
@@ -138,12 +166,10 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
     }
 
     private double getMaxHealth(LivingEntity living) {
-        // Modern Spigot uses Attribute.MAX_HEALTH (not GENERIC_MAX_HEALTH).
         AttributeInstance attributeInstance = living.getAttribute(Attribute.MAX_HEALTH);
         if (attributeInstance != null) {
             return attributeInstance.getValue();
         }
-        // Fallback (should still work)
         return living.getMaxHealth();
     }
 
@@ -155,6 +181,8 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
 
         this.healIronGolems = config.getBoolean("healIronGolems", true);
         this.healSnowGolems = config.getBoolean("healSnowGolems", true);
+        this.healVillagers = config.getBoolean("healVillagers", true);
+        this.healWanderingTraders = config.getBoolean("healWanderingTraders", false);
 
         this.healAmount = config.getDouble("healAmount", 1.0);
         if (this.healAmount <= 0.0) this.healAmount = 1.0;
@@ -184,6 +212,8 @@ public class IronGolemRegen extends JavaPlugin implements Listener {
 
         config.set("healIronGolems", true);
         config.set("healSnowGolems", true);
+        config.set("healVillagers", true);
+        config.set("healWanderingTraders", false);
 
         // Heal amount in health points: 1.0 = half heart, 2.0 = full heart.
         config.set("healAmount", 1.0);

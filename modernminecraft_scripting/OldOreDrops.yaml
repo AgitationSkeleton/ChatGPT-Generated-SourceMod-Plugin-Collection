@@ -1,0 +1,6 @@
+name: OldOreDrops
+main: com.redchanit.oldoredrops.OldOreDrops
+version: 1.0
+api-version: 1.21
+author: ChatGPT
+description: Makes iron/gold ores drop themselves unless the breaking tool has Fortune (vanilla fortune behavior preserved).

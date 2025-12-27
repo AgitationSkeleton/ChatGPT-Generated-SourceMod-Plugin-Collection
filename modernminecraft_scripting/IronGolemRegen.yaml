@@ -1,9 +1,9 @@
 name: IronGolemRegen
 main: com.redchanit.irongolemregen.IronGolemRegen
-version: 1.1
+version: 1.2
 api-version: 1.21
 author: ChatGPT
-description: Slowly regenerates iron golem and snow golem health over time (configurable).
+description: Slowly regenerates iron golems, snow golems, and villagers over time (configurable).
 
 commands:
   irongolemregen:

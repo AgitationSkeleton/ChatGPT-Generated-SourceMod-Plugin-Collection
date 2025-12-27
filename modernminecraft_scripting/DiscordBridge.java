@@ -3,7 +3,7 @@
 // - Relays Minecraft chat/events -> Discord via webhook (player avatar via Minotar isometric cube)
 // - Relays Discord channel messages -> Minecraft via JDA bot
 //
-// No config changes required.
+// Change: do NOT relay deaths for Citizens NPCs (or other NPCs that present as Player)
 
 package com.example.discordbridge;
 
@@ -30,6 +30,7 @@ import java.io.BufferedReader;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -275,13 +276,45 @@ public class DiscordBridge extends JavaPlugin implements Listener {
         String name = playerName.trim();
         if (name.isEmpty()) return null;
 
-        // Minotar docs: https://minotar.net/cube/user/100.png :contentReference[oaicite:3]{index=3}
         return "https://minotar.net/cube/" + urlEncodeLoose(name) + "/" + AVATAR_SIZE + ".png";
     }
 
     private String urlEncodeLoose(String text) {
-        // MC usernames are safe; this is only defensive
         return text.replace(" ", "%20");
+    }
+
+    // -------------------------------------------------------------------------
+    // NPC filtering (Citizens)
+    // -------------------------------------------------------------------------
+
+    private boolean isRealClientPlayer(Player player) {
+        if (player == null) return false;
+
+        // Citizens commonly tags NPC "players" with metadata "NPC"
+        if (player.hasMetadata("NPC")) {
+            return false;
+        }
+
+        // If Citizens is installed, do a stronger check via reflection (no hard dependency)
+        if (Bukkit.getPluginManager().getPlugin("Citizens") != null) {
+            try {
+                Class<?> citizensApiClass = Class.forName("net.citizensnpcs.api.CitizensAPI");
+                Method getNpcRegistry = citizensApiClass.getMethod("getNPCRegistry");
+                Object npcRegistry = getNpcRegistry.invoke(null);
+
+                // NPCRegistry has isNPC(Entity)
+                Method isNpcMethod = npcRegistry.getClass().getMethod("isNPC", org.bukkit.entity.Entity.class);
+                Object result = isNpcMethod.invoke(npcRegistry, player);
+                if (result instanceof Boolean && (Boolean) result) {
+                    return false;
+                }
+            } catch (Throwable ignored) {
+                // If Citizens is present but reflection fails, we still have the metadata check above.
+            }
+        }
+
+        // For our purposes, a real client should also be online
+        return player.isOnline();
     }
 
     // -------------------------------------------------------------------------
@@ -324,6 +357,12 @@ public class DiscordBridge extends JavaPlugin implements Listener {
         if (!relayDeaths) return;
 
         Player victim = event.getEntity();
+
+        // NEW: ignore NPC "players" such as Citizens
+        if (!isRealClientPlayer(victim)) {
+            return;
+        }
+
         String deathMessage = event.getDeathMessage();
         if (deathMessage == null || deathMessage.trim().isEmpty()) {
             deathMessage = victim.getName() + " died.";
