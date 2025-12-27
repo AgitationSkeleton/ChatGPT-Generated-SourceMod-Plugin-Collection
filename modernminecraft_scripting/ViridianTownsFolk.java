@@ -127,6 +127,10 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
 
     private boolean enabled = true;
 
+    // Dimension restrictions
+    private boolean allowSpawningInNether = false;
+    private boolean allowSpawningInEnd = false;
+
     private boolean hideNameplates = true;
 
     // Citizens collision (pushable/bumpable)
@@ -240,6 +244,8 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
             sender.sendMessage(ChatColor.GRAY + "/vtf adoptall     - adopt legacy name-prefix NPCs (spawned only)");
             sender.sendMessage(ChatColor.GRAY + "/vtf topup        - queue one population pass now");
             sender.sendMessage(ChatColor.GRAY + "/vtf purge        - remove ALL VTF-managed NPCs");
+            sender.sendMessage(ChatColor.GRAY + "/vtf purgenether - purge VTF NPCs in the Nether");
+            sender.sendMessage(ChatColor.GRAY + "/vtf purgeend    - purge VTF NPCs in the End");
             sender.sendMessage(ChatColor.GRAY + "/vtf stats        - show counts");
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadsites  - reload sites from markers.yml + sites.txt");
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadconfig - reload config.yml");
@@ -268,6 +274,16 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
             case "purge": {
                 int removed = purgeAllManaged();
                 sender.sendMessage(ChatColor.RED + "Purged VTF-managed NPCs: " + removed);
+                return true;
+            }
+            case "purgenether": {
+                int removed = purgeManagedInEnvironment(World.Environment.NETHER);
+                sender.sendMessage(ChatColor.RED + "Purged VTF-managed NPCs in the Nether: " + removed);
+                return true;
+            }
+            case "purgeend": {
+                int removed = purgeManagedInEnvironment(World.Environment.THE_END);
+                sender.sendMessage(ChatColor.RED + "Purged VTF-managed NPCs in the End: " + removed);
                 return true;
             }
             case "stats": {
@@ -636,6 +652,11 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         World w = Bukkit.getWorld(site.worldName);
         if (w == null) return;
 
+        World.Environment env = w.getEnvironment();
+        if ((env == World.Environment.NETHER && !allowSpawningInNether) || (env == World.Environment.THE_END && !allowSpawningInEnd)) {
+            return;
+        }
+
         Location center = site.center(w);
 
         // Hard safety: require player still nearby
@@ -725,6 +746,37 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
 
         return removed;
     }
+
+    int purgeManagedInEnvironment(World.Environment env) {
+        int removed = 0;
+
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (!isManagedNpc(npc) || isExcludedNpc(npc)) continue;
+
+            Location loc = null;
+            try {
+                if (npc.isSpawned() && npc.getEntity() != null) {
+                    loc = npc.getEntity().getLocation();
+                } else {
+                    loc = npc.getStoredLocation();
+                }
+            } catch (Throwable ignored) {}
+
+            if (loc == null || loc.getWorld() == null) continue;
+            if (loc.getWorld().getEnvironment() != env) continue;
+
+            try {
+                if (npc.isSpawned()) {
+                    npc.despawn();
+                }
+                npc.destroy();
+                removed++;
+            } catch (Throwable ignored) {}
+        }
+
+        return removed;
+    }
+
 
     /* ============================================================
      *  Adoption checks
@@ -1216,6 +1268,10 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
         String defaults =
                 "enabled: true\n" +
                 "\n" +
+                "dimensions:\n" +
+                "  allowNether: false\n" +
+                "  allowEnd: false\n" +
+                "\n" +
                 "nametags:\n" +
                 "  hideNameplates: true\n" +
                 "\n" +
@@ -1272,6 +1328,9 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
             reloadConfig();
 
             enabled = getConfig().getBoolean("enabled", enabled);
+
+            allowSpawningInNether = getConfig().getBoolean("dimensions.allowNether", allowSpawningInNether);
+            allowSpawningInEnd = getConfig().getBoolean("dimensions.allowEnd", allowSpawningInEnd);
 
             hideNameplates = getConfig().getBoolean("nametags.hideNameplates", hideNameplates);
 

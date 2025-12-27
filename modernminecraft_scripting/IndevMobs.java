@@ -19,6 +19,7 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
@@ -81,6 +82,25 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     private Object dynmapMarkerSet = null;   // org.dynmap.markers.MarkerSet
     private final Map<UUID, Object> dynmapMarkerByEntity = new ConcurrentHashMap<>();
 
+    // dmarkers (Dynmap markers.yml) - used only for spawn chance boosting near overworld sites
+    private int dmarkerReloadTaskId = -1;
+    private volatile List<DMarkerSite> dmarkerSites = Collections.emptyList();
+
+    private static final class DMarkerSite {
+        final String worldName;
+        final double x;
+        final double y;
+        final double z;
+
+        DMarkerSite(String worldName, double x, double y, double z) {
+            this.worldName = worldName;
+            this.x = x;
+            this.y = y;
+            this.z = z;
+        }
+    }
+
+
     @Override
     public void onEnable() {
         indevMobKey = new NamespacedKey(this, "indevmob");
@@ -115,6 +135,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         startWanderLoop();
         startDynmapUpdater();
         startEnforceLoop();
+        startDmarkerReloadLoop();
 
         // Adopt/refresh any existing NPCs (including legacy ones) after the server is up
         scheduleAdoptPass();
@@ -129,12 +150,14 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         if (dynmapTaskId != -1) Bukkit.getScheduler().cancelTask(dynmapTaskId);
         if (enforceTaskId != -1) Bukkit.getScheduler().cancelTask(enforceTaskId);
         if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
+        if (dmarkerReloadTaskId != -1) Bukkit.getScheduler().cancelTask(dmarkerReloadTaskId);
 
         spawnTaskId = -1;
         wanderTaskId = -1;
         dynmapTaskId = -1;
         enforceTaskId = -1;
         adoptTaskId = -1;
+        dmarkerReloadTaskId = -1;
 
         // delete dynmap markers
         for (Object marker : dynmapMarkerByEntity.values()) {
@@ -257,13 +280,21 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         cfg.addDefault("enabled", true);
 
         cfg.addDefault("spawning.enabledWorlds", new ArrayList<String>());
-        cfg.addDefault("spawning.tickInterval", 200);
+        cfg.addDefault("spawning.overworldOnly", true);
+        // Slightly less rare spawns near dynmap "dmarkers" (reads plugins/dynmap/markers.yml)
+        cfg.addDefault("spawning.dmarkerBoost.enabled", true);
+        cfg.addDefault("spawning.dmarkerBoost.markersFile", "plugins/dynmap/markers.yml");
+        cfg.addDefault("spawning.dmarkerBoost.markerSetIds", new ArrayList<String>());
+        cfg.addDefault("spawning.dmarkerBoost.radiusBlocks", 192.0);
+        cfg.addDefault("spawning.dmarkerBoost.multiplier", 2.0);
+        cfg.addDefault("spawning.dmarkerBoost.reloadTicks", 20 * 300);
+        cfg.addDefault("spawning.tickInterval", 400);
         cfg.addDefault("spawning.attemptsPerIntervalPerPlayer", 1);
-        cfg.addDefault("spawning.spawnChancePerAttempt", 0.10);
+        cfg.addDefault("spawning.spawnChancePerAttempt", 0.005);
         cfg.addDefault("spawning.spawnRadiusBlocks", 96);
         cfg.addDefault("spawning.minDistanceFromPlayer", 24.0);
         cfg.addDefault("spawning.locationTries", 12);
-        cfg.addDefault("spawning.maxPerWorld", 20);
+        cfg.addDefault("spawning.maxPerWorld", 12);
 
         cfg.addDefault("spawning.weights.rana", 1.0);
         cfg.addDefault("spawning.weights.steve", 1.0);
@@ -377,12 +408,17 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     private void startSpawner() {
         if (spawnTaskId != -1) Bukkit.getScheduler().cancelTask(spawnTaskId);
 
-        int intervalTicks = Math.max(20, getConfig().getInt("spawning.tickInterval", 200));
+        int intervalTicks = Math.max(20, getConfig().getInt("spawning.tickInterval", 400));
         spawnTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
             if (!citizensAvailable) return;
             if (!getConfig().getBoolean("enabled", true)) return;
 
             for (World world : Bukkit.getWorlds()) {
+                // Overworld-only natural occurrence (unless explicitly turned off)
+                if (getConfig().getBoolean("spawning.overworldOnly", true) && world.getEnvironment() != World.Environment.NORMAL) {
+                    continue;
+                }
+
                 List<String> enabledWorlds = getConfig().getStringList("spawning.enabledWorlds");
                 if (enabledWorlds != null && !enabledWorlds.isEmpty() && !enabledWorlds.contains(world.getName())) {
                     continue;
@@ -397,12 +433,24 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
                 int attemptsPerPlayer = Math.max(0, getConfig().getInt("spawning.attemptsPerIntervalPerPlayer", 1));
                 int radius = Math.max(16, getConfig().getInt("spawning.spawnRadiusBlocks", 96));
-                double spawnChance = clamp01(getConfig().getDouble("spawning.spawnChancePerAttempt", 0.10));
+                double spawnChance = clamp01(getConfig().getDouble("spawning.spawnChancePerAttempt", 0.005));
+
+                boolean boostEnabled = getConfig().getBoolean("spawning.dmarkerBoost.enabled", true);
+                double boostRadius = Math.max(0.0, getConfig().getDouble("spawning.dmarkerBoost.radiusBlocks", 192.0));
+                double boostMultiplier = Math.max(1.0, getConfig().getDouble("spawning.dmarkerBoost.multiplier", 2.0));
+                double boostRadiusSq = boostRadius * boostRadius;
 
                 for (Player player : players) {
                     for (int attemptIndex = 0; attemptIndex < attemptsPerPlayer; attemptIndex++) {
                         if (currentCount >= maxPerWorld) break;
-                        if (Math.random() > spawnChance) continue;
+                        double effectiveChance = spawnChance;
+                        if (boostEnabled && boostRadiusSq > 0.0) {
+                            double falloff = getDmarkerFalloff01(player.getLocation(), boostRadiusSq);
+                            if (falloff > 0.0) {
+                                effectiveChance = clamp01(spawnChance * (1.0 + (boostMultiplier - 1.0) * falloff));
+                            }
+                        }
+                        if (Math.random() > effectiveChance) continue;
 
                         Location spawnLoc = pickSpawnLocationNear(player.getLocation(), radius);
                         if (spawnLoc == null) continue;
@@ -621,6 +669,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     private void scheduleAdoptPass() {
         if (!citizensAvailable) return;
         if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
+        if (dmarkerReloadTaskId != -1) Bukkit.getScheduler().cancelTask(dmarkerReloadTaskId);
 
         // Run once shortly after enable, and again a few seconds later
         adoptTaskId = Bukkit.getScheduler().scheduleSyncDelayedTask(this, this::adoptAllSpawnedNpcs, 40L);
@@ -1280,9 +1329,11 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         if (dynmapTaskId != -1) Bukkit.getScheduler().cancelTask(dynmapTaskId);
         if (enforceTaskId != -1) Bukkit.getScheduler().cancelTask(enforceTaskId);
         if (adoptTaskId != -1) Bukkit.getScheduler().cancelTask(adoptTaskId);
+        if (dmarkerReloadTaskId != -1) Bukkit.getScheduler().cancelTask(dmarkerReloadTaskId);
         dynmapTaskId = -1;
         enforceTaskId = -1;
         adoptTaskId = -1;
+        dmarkerReloadTaskId = -1;
         if (!dynmapAvailable) return;
 
         int ticks = Math.max(20, getConfig().getInt("dynmap.updateTicks", 40));
@@ -1456,5 +1507,138 @@ private void addRandomDrop(java.util.List<ItemStack> drops, Material material, i
     if (amount <= 0) return;
     drops.add(new ItemStack(material, amount));
 }
+
+
+
+    // ---------------------------------------------------------------------
+    // Dynmap "dmarker" proximity boost support
+    // ---------------------------------------------------------------------
+
+    private final Object dmarkerLock = new Object();
+    private java.util.List<org.bukkit.Location> cachedDmarkerLocations = new java.util.ArrayList<>();
+
+    private void startDmarkerReloadLoop() {
+        // Load once quickly after enable
+        Bukkit.getScheduler().runTaskLater(this, () -> {
+            try {
+                reloadDmarkerCache();
+            } catch (Exception ignored) {}
+        }, 40L);
+
+        long reloadTicks = getConfig().getLong("spawning.dmarkerBoost.reloadTicks", 20L * 300L);
+        if (reloadTicks <= 0L) reloadTicks = 20L * 300L;
+
+        if (dmarkerReloadTaskId != -1) {
+            Bukkit.getScheduler().cancelTask(dmarkerReloadTaskId);
+            dmarkerReloadTaskId = -1;
+        }
+
+        dmarkerReloadTaskId = Bukkit.getScheduler().runTaskTimerAsynchronously(this, () -> {
+            try {
+                reloadDmarkerCache();
+            } catch (Exception ignored) {}
+        }, reloadTicks, reloadTicks).getTaskId();
+    }
+
+    private void reloadDmarkerCache() {
+        if (!getConfig().getBoolean("spawning.dmarkerBoost.enabled", true)) {
+            synchronized (dmarkerLock) {
+                cachedDmarkerLocations = new java.util.ArrayList<>();
+            }
+            return;
+        }
+
+        String markersPath = getConfig().getString("spawning.dmarkerBoost.markersFile", "plugins/dynmap/markers.yml");
+        java.io.File markersFile = new java.io.File(markersPath);
+        if (!markersFile.exists()) {
+            synchronized (dmarkerLock) {
+                cachedDmarkerLocations = new java.util.ArrayList<>();
+            }
+            return;
+        }
+
+        java.util.List<String> allowedSetIds = getConfig().getStringList("spawning.dmarkerBoost.markerSetIds");
+        boolean filterBySet = allowedSetIds != null && !allowedSetIds.isEmpty();
+
+        org.bukkit.configuration.file.YamlConfiguration yaml = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(markersFile);
+
+        // Dynmap markers.yml has historically used "sets" or "marker-sets" depending on version/config.
+        org.bukkit.configuration.ConfigurationSection setsSec = yaml.getConfigurationSection("sets");
+        if (setsSec == null) setsSec = yaml.getConfigurationSection("marker-sets");
+        if (setsSec == null) setsSec = yaml.getConfigurationSection("markersets");
+
+        java.util.List<org.bukkit.Location> newLocations = new java.util.ArrayList<>();
+
+        if (setsSec != null) {
+            for (String setId : setsSec.getKeys(false)) {
+                if (filterBySet && !allowedSetIds.contains(setId)) continue;
+
+                org.bukkit.configuration.ConfigurationSection setSec = setsSec.getConfigurationSection(setId);
+                if (setSec == null) continue;
+
+                org.bukkit.configuration.ConfigurationSection markersSec = setSec.getConfigurationSection("markers");
+                if (markersSec == null) markersSec = setSec.getConfigurationSection("marker");
+                if (markersSec == null) continue;
+
+                for (String markerId : markersSec.getKeys(false)) {
+                    org.bukkit.configuration.ConfigurationSection markerSec = markersSec.getConfigurationSection(markerId);
+                    if (markerSec == null) continue;
+
+                    String worldName = markerSec.getString("world");
+                    if (worldName == null || worldName.isEmpty()) continue;
+
+                    org.bukkit.World w = Bukkit.getWorld(worldName);
+                    if (w == null) continue;
+                    if (w.getEnvironment() != org.bukkit.World.Environment.NORMAL) continue;
+
+                    double x = markerSec.getDouble("x");
+                    double y = markerSec.getDouble("y");
+                    double z = markerSec.getDouble("z");
+
+                    newLocations.add(new org.bukkit.Location(w, x, y, z));
+                }
+            }
+        }
+
+        synchronized (dmarkerLock) {
+            cachedDmarkerLocations = newLocations;
+        }
+    }
+
+    private double getDmarkerFalloff01(org.bukkit.Location playerLoc, double radiusSq) {
+        if (playerLoc == null || playerLoc.getWorld() == null) return 0.0;
+
+        java.util.List<org.bukkit.Location> snapshot;
+        synchronized (dmarkerLock) {
+            snapshot = cachedDmarkerLocations;
+        }
+        if (snapshot == null || snapshot.isEmpty()) return 0.0;
+
+        org.bukkit.World w = playerLoc.getWorld();
+        double px = playerLoc.getX();
+        double pz = playerLoc.getZ();
+
+        double bestDistSq = Double.MAX_VALUE;
+
+        for (org.bukkit.Location markerLoc : snapshot) {
+            if (markerLoc == null || markerLoc.getWorld() != w) continue;
+            double dx = markerLoc.getX() - px;
+            double dz = markerLoc.getZ() - pz;
+            double distSq = (dx * dx) + (dz * dz);
+            if (distSq < bestDistSq) bestDistSq = distSq;
+        }
+
+        if (bestDistSq == Double.MAX_VALUE) return 0.0;
+        if (bestDistSq > radiusSq) return 0.0;
+
+        double radius = Math.sqrt(radiusSq);
+        if (radius <= 0.0) return 0.0;
+
+        double dist = Math.sqrt(bestDistSq);
+
+        // Linear falloff: 1.0 at the marker, 0.0 at/after radius
+        double falloff = (radius - dist) / radius;
+        return clamp01(falloff);
+    }
 
 }

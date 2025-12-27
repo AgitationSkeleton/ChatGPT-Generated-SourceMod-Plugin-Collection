@@ -39,6 +39,8 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class MercMobs extends JavaPlugin implements Listener {
 
@@ -55,6 +57,10 @@ public final class MercMobs extends JavaPlugin implements Listener {
     private static final String CIT_KEY_MODE = "mercmobs_mode";          // "follow" | "defend" | "patrol"
     private static final String CIT_KEY_BOWMAN = "mercmobs_bowman";      // boolean
     private static final String CIT_KEY_WEAPON = "mercmobs_weapon";      // "fist" | "bow" | "iron" | "gold" | "diamond"
+    private static final String CIT_KEY_PATROL_WORLD = "mm_patrol_world";
+    private static final String CIT_KEY_PATROL_X = "mm_patrol_x";
+    private static final String CIT_KEY_PATROL_Y = "mm_patrol_y";
+    private static final String CIT_KEY_PATROL_Z = "mm_patrol_z";
     private static final String CIT_KEY_ANGRY_TARGET = "mercmobs_angry_target"; // UUID string (player) for wild angry
     private static final String CIT_KEY_LAST_COMBAT = "mercmobs_last_combat";  // long millis
     private static final String CIT_KEY_FUSE_UNTIL = "mercmobs_fuse_until";    // long millis
@@ -389,6 +395,10 @@ public final class MercMobs extends JavaPlugin implements Listener {
         if (sub.equals("status")) {
             sender.sendMessage("MercMobs v" + getDescription().getVersion());
             sender.sendMessage("Citizens: " + (citizensAvailable ? "OK" : "MISSING"));
+            // Refresh dynmap markers right now so status reflects reality
+            try { initDynmap(); } catch (Throwable ignored) {}
+            try { refreshDynmapMarkers(); } catch (Throwable ignored) {}
+
             sender.sendMessage("Dynmap markers: " + ((dynmapAvailable || dynmapFileMarkersAvailable) ? ("OK (" + dynmapSpawnMarkers.size() + ")") : "MISSING/DISABLED"));
             sender.sendMessage("Tracked merc entities (alive): " + countAliveTracked());
             sender.sendMessage("Skin cache keys: " + skinCache.keySet());
@@ -2970,7 +2980,35 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
     // ------------------------------------------------------------
 
 
-    private void refreshDynmapMarkersFallbackFile() {
+    
+    private Location getStoredPatrolCenter(NPC npc, Location fallback) {
+        try {
+            Object wNameObj = npc.data().get(CIT_KEY_PATROL_WORLD);
+            if (wNameObj == null) return fallback;
+            World w = Bukkit.getWorld(String.valueOf(wNameObj));
+            if (w == null) return fallback;
+
+            Double x = getDoubleData(npc, CIT_KEY_PATROL_X);
+            Double y = getDoubleData(npc, CIT_KEY_PATROL_Y);
+            Double z = getDoubleData(npc, CIT_KEY_PATROL_Z);
+            if (x == null || y == null || z == null) return fallback;
+
+            return new Location(w, x, y, z);
+        } catch (Throwable t) {
+            return fallback;
+        }
+    }
+
+    private Double getDoubleData(NPC npc, String key) {
+        try {
+            Object o = npc.data().get(key);
+            if (o instanceof Number n) return n.doubleValue();
+            if (o instanceof String s) return Double.parseDouble(s);
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+private void refreshDynmapMarkersFallbackFile() {
         dynmapFileMarkersAvailable = false;
         dynmapSpawnMarkers.clear();
 
@@ -2990,75 +3028,114 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
         dynmapFileMarkersAvailable = added > 0;
     }
 
+
     private int parseDynmapMarkersYml(File f, List<String> requiredContains, List<String> exceptionKeywords) {
+        // Robust line-scanner: Dynmap markers.yml formats vary across versions.
+        // We look for repeated groups of label/world/x/z (in any order), and "commit" a marker
+        // when we see a new label or hit EOF.
         int added = 0;
+
+        String label = null;
+        String world = null;
+        Double x = null;
+        Double z = null;
 
         try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
             String line;
-
-            String label = null;
-            String world = null;
-            Integer x = null;
-            Integer z = null;
-
             while ((line = br.readLine()) != null) {
-                String t = line.trim();
+                String trimmed = line.trim();
+                if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
 
-                // marker id header line like "someid:"
-                if (t.endsWith(":") && !t.startsWith("-") && !t.startsWith("label:") && !t.startsWith("world:")) {
-                    // flush previous
-                    if (label != null && world != null && x != null && z != null) {
-                        if (labelPassesFilters(label, requiredContains, exceptionKeywords)) {
-                            World w = Bukkit.getWorld(world);
-                            if (w != null) {
-                                int y = w.getHighestBlockYAt(x, z) + 1;
-                                dynmapSpawnMarkers.add(new Location(w, x + 0.5, y, z + 0.5));
-                                added++;
-                            }
-                        }
-                    }
-                    label = null; world = null; x = null; z = null;
+                // Some dynmap builds embed location as an inline map.
+                if (trimmed.startsWith("location:")) {
+                    String rest = trimmed.substring("location:".length()).trim();
+                    String w = extractInlineValue(rest, "world");
+                    Double xx = extractInlineDouble(rest, "x");
+                    Double zz = extractInlineDouble(rest, "z");
+                    if (w != null) world = w;
+                    if (xx != null) x = xx;
+                    if (zz != null) z = zz;
                     continue;
                 }
 
-                if (t.startsWith("label:")) {
-                    label = stripQuotes(t.substring("label:".length()).trim());
+                if (trimmed.startsWith("label:")) {
+                    // commit previous marker when a new label appears
+                    added += maybeAddDynmapMarker(label, world, x, z, requiredContains, exceptionKeywords);
+                    label = stripQuotes(trimmed.substring("label:".length()).trim());
+                    world = null;
+                    x = null;
+                    z = null;
                     continue;
                 }
-                if (t.startsWith("world:")) {
-                    world = stripQuotes(t.substring("world:".length()).trim());
+
+                if (trimmed.startsWith("world:")) {
+                    world = stripQuotes(trimmed.substring("world:".length()).trim());
                     continue;
                 }
-                if (t.startsWith("x:")) {
-                    x = tryParseInt(stripQuotes(t.substring("x:".length()).trim()));
+
+                if (trimmed.startsWith("x:")) {
+                    x = tryParseDouble(stripQuotes(trimmed.substring("x:".length()).trim()));
                     continue;
                 }
-                if (t.startsWith("z:")) {
-                    z = tryParseInt(stripQuotes(t.substring("z:".length()).trim()));
+
+                if (trimmed.startsWith("z:")) {
+                    z = tryParseDouble(stripQuotes(trimmed.substring("z:".length()).trim()));
                     continue;
                 }
             }
 
-            // flush at EOF
-            if (label != null && world != null && x != null && z != null) {
-                if (labelPassesFilters(label, requiredContains, exceptionKeywords)) {
-                    World w = Bukkit.getWorld(world);
-                    if (w != null) {
-                        int y = w.getHighestBlockYAt(x, z) + 1;
-                        dynmapSpawnMarkers.add(new Location(w, x + 0.5, y, z + 0.5));
-                        added++;
-                    }
-                }
-            }
+            // flush EOF
+            added += maybeAddDynmapMarker(label, world, x, z, requiredContains, exceptionKeywords);
 
         } catch (Throwable ex) {
             if (getConfig().getBoolean("debug", false)) {
-				getLogger().warning("Failed to parse dynmap markers.yml: " + ex.getMessage());
-			}
+                getLogger().warning("Failed to parse dynmap markers.yml: " + ex.getMessage());
+            }
         }
 
         return added;
     }
+
+    private int maybeAddDynmapMarker(String label, String world, Double x, Double z,
+                                     List<String> requiredContains, List<String> exceptionKeywords) {
+        if (label == null || world == null || x == null || z == null) return 0;
+        if (!labelPassesFilters(label, requiredContains, exceptionKeywords)) return 0;
+
+        World w = Bukkit.getWorld(world);
+        if (w == null) return 0;
+
+        int xi = (int) Math.round(x);
+        int zi = (int) Math.round(z);
+
+        int y;
+        try {
+            y = w.getHighestBlockYAt(xi, zi) + 1;
+        } catch (Throwable t) {
+            y = w.getSpawnLocation().getBlockY();
+        }
+
+        dynmapSpawnMarkers.add(new Location(w, xi + 0.5, y, zi + 0.5));
+        return 1;
+    }
+
+    private Double tryParseDouble(String s) {
+        try { return Double.parseDouble(s); } catch (Throwable t) { return null; }
+    }
+
+    private String extractInlineValue(String s, String key) {
+        if (s == null) return null;
+        Pattern p = Pattern.compile("\\b" + Pattern.quote(key) + "\\s*:\\s*([^,}]+)");
+        Matcher m = p.matcher(s);
+        if (!m.find()) return null;
+        return stripQuotes(m.group(1).trim());
+    }
+
+    private Double extractInlineDouble(String s, String key) {
+        String v = extractInlineValue(s, key);
+        if (v == null) return null;
+        return tryParseDouble(v);
+    }
+
 
     private boolean labelPassesFilters(String label, List<String> requiredContains, List<String> exceptionKeywords) {
         String lower = label.toLowerCase(Locale.ROOT);
@@ -3304,13 +3381,25 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
         };
     }
 
+
     private void setMercMode(NPC npc, MercMode mode) {
-        npc.data().setPersistent(CIT_KEY_MODE, switch (mode) {
-            case DEFEND -> "defend";
-            case PATROL -> "patrol";
-            default -> "follow";
-        });
+        // Persist mode, but also immediately cancel any existing navigation so behavior changes take effect right away.
+        try {
+            npc.data().setPersistent(CIT_KEY_MODE, switch (mode) {
+                case DEFEND -> "defend";
+                case PATROL -> "patrol";
+                default -> "follow";
+            });
+        } catch (Throwable ignored) {}
+
+        try {
+            Navigator nav = npc.getNavigator();
+            if (nav != null) {
+                try { nav.cancelNavigation(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable ignored) {}
     }
+
 
     private boolean isBowman(NPC npc) {
         try {

@@ -1,0 +1,13 @@
+name: StonePurifier
+main: com.redchanit.stonepurifier.StonePurifier
+version: 1.0
+api-version: 1.21
+description: Replaces natural diorite/andesite/granite with stone in new chunks and via command.
+commands:
+  stonepurifier:
+    description: Replace diorite/andesite/granite with stone in loaded chunks (nearby) or reload config.
+    usage: /<command> [radiusChunks] | /<command> reload
+permissions:
+  stonepurifier.use:
+    description: Allows use of /stonepurifier
+    default: op
