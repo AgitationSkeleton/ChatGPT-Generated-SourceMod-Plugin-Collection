@@ -38,9 +38,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.ConcurrentHashMap;
 
 public final class MercMobs extends JavaPlugin implements Listener {
 
@@ -51,18 +51,12 @@ public final class MercMobs extends JavaPlugin implements Listener {
     private static final String CIT_KEY_TYPE = "mercmobs_type";          // "merc" | "green_tnt" | "jackblack"
     private static final String CIT_KEY_COLOR = "mercmobs_color";        // "red" | "blue" | "green" | "yellow" | "none"
     private static final String CIT_KEY_STATE = "mercmobs_state";        // "wild_neutral" | "wild_angry" | "tame"
-    private static final String CIT_KEY_OWNER = "mercmobs_owner";
-    private static final String CIT_KEY_SHARED = "mercmobs_shared";
-    private static final String CIT_KEY_LEADER = "mercmobs_leader";        // UUID string
+    private static final String CIT_KEY_OWNER = "mercmobs_owner";        // UUID string
     private static final String CIT_KEY_ASSIST_TARGET = "mercmobs_assist_target"; // UUID string (non-persistent)
     private static final String CIT_KEY_ASSIST_UNTIL_MS = "mercmobs_assist_until_ms"; // long (non-persistent)
     private static final String CIT_KEY_MODE = "mercmobs_mode";          // "follow" | "defend" | "patrol"
     private static final String CIT_KEY_BOWMAN = "mercmobs_bowman";      // boolean
     private static final String CIT_KEY_WEAPON = "mercmobs_weapon";      // "fist" | "bow" | "iron" | "gold" | "diamond"
-    private static final String CIT_KEY_PATROL_WORLD = "mm_patrol_world";
-    private static final String CIT_KEY_PATROL_X = "mm_patrol_x";
-    private static final String CIT_KEY_PATROL_Y = "mm_patrol_y";
-    private static final String CIT_KEY_PATROL_Z = "mm_patrol_z";
     private static final String CIT_KEY_ANGRY_TARGET = "mercmobs_angry_target"; // UUID string (player) for wild angry
     private static final String CIT_KEY_LAST_COMBAT = "mercmobs_last_combat";  // long millis
     private static final String CIT_KEY_FUSE_UNTIL = "mercmobs_fuse_until";    // long millis
@@ -179,24 +173,7 @@ public final class MercMobs extends JavaPlugin implements Listener {
         startEnforceLoop();
         scheduleAdoptPass();
         startDynmapMarkerRefresh();
-    
-
-// Periodic state save (and safety net for restarts)
-try {
-    long saveTicks = Math.max(20L * 30L, getConfig().getLong("persistence.saveIntervalSeconds", 120L) * 20L);
-    stateSaveTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, () -> {
-        try { saveAllMercStates(); } catch (Throwable ignored) {}
-    }, saveTicks, saveTicks);
-} catch (Throwable ignored) {}
-
-// After Citizens finishes spawning NPCs, hook ours and resume their saved modes.
-Bukkit.getScheduler().runTaskLater(this, () -> {
-    try { initDynmap(); } catch (Throwable ignored) {}
-    try { hookExistingMercNpcsAndResume(); } catch (Throwable ignored) {}
-}, 40L);
-
     }
-
 
     @Override
     public void onDisable() {
@@ -210,151 +187,7 @@ Bukkit.getScheduler().runTaskLater(this, () -> {
         typeByEntity.clear();
         dynmapSpawnMarkers.clear();
         skinCache.clear();
-    
-        try { if (stateSaveTaskId != -1) Bukkit.getScheduler().cancelTask(stateSaveTaskId); } catch (Throwable ignored) {}
-        try { saveAllMercStates(); } catch (Throwable ignored) {}
     }
-
-private void saveAllMercStates() {
-    try {
-        if (mercStateFile == null) mercStateFile = new File(getDataFolder(), "merc_state.yml");
-        if (!getDataFolder().exists()) getDataFolder().mkdirs();
-
-        org.bukkit.configuration.file.YamlConfiguration yc = new org.bukkit.configuration.file.YamlConfiguration();
-        org.bukkit.configuration.ConfigurationSection root = yc.createSection("npcs");
-
-        for (NPC npc : CitizensAPI.getNPCRegistry()) {
-            if (npc == null) continue;
-            if (!npc.data().get(CIT_KEY_MERCMOBS, false)) continue;
-
-            org.bukkit.configuration.ConfigurationSection sec = root.createSection(String.valueOf(npc.getId()));
-            UUID owner = getOwnerUuid(npc);
-            if (owner != null) sec.set("owner", owner.toString());
-
-            UUID leader = getLeaderUuid(npc);
-            if (leader != null) sec.set("leader", leader.toString());
-
-            sec.set("mode", String.valueOf(getMercMode(npc)));
-            sec.set("state", String.valueOf(getMercState(npc)));
-            sec.set("type", String.valueOf(getMercType(npc)));
-            sec.set("color", String.valueOf(getMercColor(npc)));
-
-            Set<UUID> co = getCoOwnerUuids(npc);
-            if (!co.isEmpty()) {
-                List<String> list = new ArrayList<>();
-                for (UUID u : co) list.add(u.toString());
-                sec.set("shared", list);
-            }
-
-            Location patrol = getPatrolAnchor(npc);
-            if (patrol != null && patrol.getWorld() != null) {
-                sec.set("patrol.world", patrol.getWorld().getName());
-                sec.set("patrol.x", patrol.getX());
-                sec.set("patrol.y", patrol.getY());
-                sec.set("patrol.z", patrol.getZ());
-            }
-        }
-
-        yc.save(mercStateFile);
-    } catch (Throwable t) {
-        if (debugLogging) getLogger().warning("Failed to save merc_state.yml: " + t.getMessage());
-    }
-}
-
-private void loadAllMercStatesIntoNpcData() {
-    try {
-        if (mercStateFile == null) mercStateFile = new File(getDataFolder(), "merc_state.yml");
-        if (!mercStateFile.isFile()) return;
-
-        org.bukkit.configuration.file.YamlConfiguration yc = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(mercStateFile);
-        org.bukkit.configuration.ConfigurationSection root = yc.getConfigurationSection("npcs");
-        if (root == null) return;
-
-        for (String idKey : root.getKeys(false)) {
-            org.bukkit.configuration.ConfigurationSection sec = root.getConfigurationSection(idKey);
-            if (sec == null) continue;
-
-            int npcId;
-            try { npcId = Integer.parseInt(idKey); } catch (Throwable ignored) { continue; }
-
-            NPC npc = CitizensAPI.getNPCRegistry().getById(npcId);
-            if (npc == null) continue;
-            if (!npc.data().get(CIT_KEY_MERCMOBS, false)) continue;
-
-            String ownerStr = sec.getString("owner", null);
-            if (ownerStr != null && npc.data().get(CIT_KEY_OWNER) == null) npc.data().setPersistent(CIT_KEY_OWNER, ownerStr);
-
-            String leaderStr = sec.getString("leader", null);
-            if (leaderStr != null && npc.data().get(CIT_KEY_LEADER) == null) npc.data().setPersistent(CIT_KEY_LEADER, leaderStr);
-
-            String modeStr = sec.getString("mode", null);
-            if (modeStr != null && npc.data().get(CIT_KEY_MODE) == null) npc.data().setPersistent(CIT_KEY_MODE, modeStr);
-
-            String stateStr = sec.getString("state", null);
-            if (stateStr != null && npc.data().get(CIT_KEY_STATE) == null) npc.data().setPersistent(CIT_KEY_STATE, stateStr);
-
-            String sharedStr = null;
-            List<String> sharedList = sec.getStringList("shared");
-            if (sharedList != null && !sharedList.isEmpty()) sharedStr = String.join(",", sharedList);
-            if (sharedStr != null && npc.data().get(CIT_KEY_SHARED) == null) npc.data().setPersistent(CIT_KEY_SHARED, sharedStr);
-
-            String pw = sec.getString("patrol.world", null);
-            if (pw != null) {
-                double px = sec.getDouble("patrol.x", 0.0);
-                double py = sec.getDouble("patrol.y", 0.0);
-                double pz = sec.getDouble("patrol.z", 0.0);
-                npc.data().setPersistent(CIT_KEY_PATROL_ANCHOR, pw + "," + px + "," + py + "," + pz);
-            }
-        }
-    } catch (Throwable t) {
-        if (debugLogging) getLogger().warning("Failed to load merc_state.yml: " + t.getMessage());
-    }
-}
-
-private void hookExistingMercNpcsAndResume() {
-    try {
-        int hooked = 0;
-        for (NPC npc : CitizensAPI.getNPCRegistry()) {
-            if (npc == null) continue;
-            if (!npc.data().get(CIT_KEY_MERCMOBS, false)) continue;
-
-            if (!npc.isSpawned()) continue;
-            Entity ent = npc.getEntity();
-            if (ent == null) continue;
-
-            // Make sure our tracking + tags are in place
-            tagEntity(ent, npc);
-            hideNameplate(npc, ent);
-            enableNpcCollision(ent);
-
-            // Resume behavior based on stored mode/state
-            MercMode mode = getMercMode(npc);
-            if (mode == MercMode.PATROL) {
-                schedulePatrolWander(npc, true);
-            } else if (mode == MercMode.FOLLOW) {
-                // Follow is handled by the periodic tick, but ensure navigator isn't stuck
-                try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
-            } else if (mode == MercMode.DEFEND) {
-                scheduleDefendIdle(npc, true);
-            }
-
-            hooked++;
-        }
-
-        if (debugLogging) getLogger().info("Hooked existing MercMobs NPCs: " + hooked);
-    } catch (Throwable t) {
-        if (debugLogging) getLogger().warning("Failed to hook existing MercMobs NPCs: " + t.getMessage());
-    }
-}
-
-private void enableNpcCollision(Entity ent) {
-    // Citizens NPC entity type is usually Player; collidable varies by server impl. Best-effort only.
-    try {
-        java.lang.reflect.Method m = ent.getClass().getMethod("setCollidable", boolean.class);
-        m.invoke(ent, true);
-    } catch (Throwable ignored) {}
-}
-
 
     private void stopTask(int id) {
         if (id != -1) Bukkit.getScheduler().cancelTask(id);
@@ -442,6 +275,7 @@ private void enableNpcCollision(Entity ent) {
 
         // Tamed behavior
         cfg.addDefault("tamed.followRange", 18.0);
+        cfg.addDefault("tamed.personalSpaceDistance", 3.0);
         cfg.addDefault("tamed.teleportIfFartherThan", 28.0);
         cfg.addDefault("tamed.commandHearRange", 32.0);
         cfg.addDefault("tamed.patrolRadius", 20.0);
@@ -558,10 +392,6 @@ private void enableNpcCollision(Entity ent) {
         if (sub.equals("status")) {
             sender.sendMessage("MercMobs v" + getDescription().getVersion());
             sender.sendMessage("Citizens: " + (citizensAvailable ? "OK" : "MISSING"));
-            // Refresh dynmap markers right now so status reflects reality
-            try { initDynmap(); } catch (Throwable ignored) {}
-            try { refreshDynmapMarkers(); } catch (Throwable ignored) {}
-
             sender.sendMessage("Dynmap markers: " + ((dynmapAvailable || dynmapFileMarkersAvailable) ? ("OK (" + dynmapSpawnMarkers.size() + ")") : "MISSING/DISABLED"));
             sender.sendMessage("Tracked merc entities (alive): " + countAliveTracked());
             sender.sendMessage("Skin cache keys: " + skinCache.keySet());
@@ -707,21 +537,6 @@ Location base = snapToSurface(player.getLocation());
         // Food heal (tamed only)
         if (state == MercState.TAME && getConfig().getBoolean("healing.food.enabled", true)) {
             UUID owner = getOwnerUuid(npc);
-
-// If a co-owner interacts with a tamed merc that's currently stationary/patrol/defend, allow them to take lead.
-if (owner != null && !owner.equals(player.getUniqueId()) && isOwnerOrCoOwner(npc, player.getUniqueId())) {
-    MercState st = getMercState(npc);
-    if (st == MercState.TAME) {
-        MercMode mode = getMercMode(npc);
-        if (mode == MercMode.STOP || mode == MercMode.PATROL || mode == MercMode.DEFEND) {
-            setLeaderUuid(npc, player.getUniqueId());
-            setMercMode(npc, MercMode.FOLLOW);
-            player.sendMessage(ChatColor.GREEN + "This merc is now following you (co-owner).");
-            event.setCancelled(true);
-            return;
-        }
-    }
-}
             if (owner != null && owner.equals(player.getUniqueId())) {
                 if (mat != Material.AIR && mat != Material.ROTTEN_FLESH && mat.isEdible()) {
                     LivingEntity living = (clicked instanceof LivingEntity) ? (LivingEntity) clicked : null;
@@ -796,21 +611,6 @@ if (owner != null && !owner.equals(player.getUniqueId()) && isOwnerOrCoOwner(npc
         // Owner click toggles defend/follow (tamed only)
         if (state == MercState.TAME) {
             UUID owner = getOwnerUuid(npc);
-
-// If a co-owner interacts with a tamed merc that's currently stationary/patrol/defend, allow them to take lead.
-if (owner != null && !owner.equals(player.getUniqueId()) && isOwnerOrCoOwner(npc, player.getUniqueId())) {
-    MercState st = getMercState(npc);
-    if (st == MercState.TAME) {
-        MercMode mode = getMercMode(npc);
-        if (mode == MercMode.STOP || mode == MercMode.PATROL || mode == MercMode.DEFEND) {
-            setLeaderUuid(npc, player.getUniqueId());
-            setMercMode(npc, MercMode.FOLLOW);
-            player.sendMessage(ChatColor.GREEN + "This merc is now following you (co-owner).");
-            event.setCancelled(true);
-            return;
-        }
-    }
-}
             if (owner != null && owner.equals(player.getUniqueId())) {
                 // If holding a taming item or food we already handled, otherwise toggle mode
                 MercMode mode = getMercMode(npc);
@@ -1848,7 +1648,48 @@ private Location pickSpawnOrigin(World world, Location nearPlayer, int radius) {
         }
     }
 
-    private void handleTamedBehavior(NPC npc, LivingEntity living, MercMode mode) {
+    
+private Location getPatrolAnchorLocation(NPC npc, Player owner) {
+    if (npc == null) return null;
+
+    // 1) Try existing stored patrol anchor (world,x,y,z)
+    try {
+        Object raw = npc.data().get(CIT_KEY_PATROL_ANCHOR);
+        if (raw instanceof String) {
+            String s = ((String) raw).trim();
+            if (!s.isEmpty()) {
+                String[] parts = s.split(",");
+                if (parts.length >= 4) {
+                    World w = Bukkit.getWorld(parts[0]);
+                    if (w != null) {
+                        double x = Double.parseDouble(parts[1]);
+                        double y = Double.parseDouble(parts[2]);
+                        double z = Double.parseDouble(parts[3]);
+                        return new Location(w, x, y, z);
+                    }
+                }
+            }
+        }
+    } catch (Throwable ignored) {}
+
+    // 2) Capture owner's current location as the patrol anchor and persist it
+    if (owner != null) {
+        Location anchor = owner.getLocation();
+        if (anchor == null || anchor.getWorld() == null) return null;
+
+        Location saved = anchor.clone();
+        try {
+            npc.data().setPersistent(CIT_KEY_PATROL_ANCHOR,
+                    saved.getWorld().getName() + "," + saved.getX() + "," + saved.getY() + "," + saved.getZ());
+        } catch (Throwable ignored) {}
+        return saved;
+    }
+
+    return null;
+}
+
+
+private void handleTamedBehavior(NPC npc, LivingEntity living, MercMode mode) {
         UUID ownerUuid = getOwnerUuid(npc);
         if (ownerUuid == null) {
             // no owner -> defensive idle
@@ -1856,9 +1697,7 @@ private Location pickSpawnOrigin(World world, Location nearPlayer, int radius) {
             return;
         }
 
-        UUID leaderUuid = getLeaderUuid(npc);
-                if (leaderUuid == null) leaderUuid = ownerUuid;
-                Player owner = Bukkit.getPlayer(leaderUuid);
+        Player owner = Bukkit.getPlayer(ownerUuid);
         if (owner == null || !owner.isOnline()) {
             if (getConfig().getBoolean("tamed.autoDefendOnOwnerMissing", true)) {
                 setMercMode(npc, MercMode.DEFEND);
@@ -1991,7 +1830,7 @@ private Location pickSpawnOrigin(World world, Location nearPlayer, int radius) {
         }
 
         // Otherwise: wander idle (passive-mob style) unless a hostile or enemy faction is nearby
-        LivingEntity hostile = findNearestHostile(npc, living, Math.max(6.0, getConfig().getDouble("combat.hostileEngageRange", 14.0)));
+        LivingEntity hostile = findNearestHostile(living, Math.max(6.0, getConfig().getDouble("combat.hostileEngageRange", 14.0)));
         if (hostile != null) {
             Navigator nav = npc.getNavigator();
             if (nav != null) {
@@ -2090,10 +1929,10 @@ private Location pickSpawnOrigin(World world, Location nearPlayer, int radius) {
 
         if (state == MercState.TAME) {
             // Tamed: engage nearby hostiles (monsters) automatically
-            target = findNearestHostile(npc, attacker, hostileRange);
+            target = findNearestHostile(attacker, hostileRange);
         } else {
             // Wild: hostiles and (for colored mercs) enemy factions
-            target = findNearestHostile(npc, attacker, hostileRange);
+            target = findNearestHostile(attacker, hostileRange);
 
             if (target == null && (type == MercType.MERC || type == MercType.GREEN_TNT)) {
                 MercColor color = getMercColor(npc);
@@ -2530,7 +2369,7 @@ private void handleJackBlackChat(NPC npc, LivingEntity jack) {
 
             if (getMercState(npc) != MercState.TAME) continue;
             UUID o = getOwnerUuid(npc);
-            if (o == null || !isOwnerOrCoOwner(npc, owner.getUniqueId())) continue;
+            if (o == null || !o.equals(owner.getUniqueId())) continue;
 
             // must be in same world group and within range
             String mercBase = worldBaseName(ent.getWorld().getName());
@@ -2547,10 +2386,6 @@ private void handleJackBlackChat(NPC npc, LivingEntity jack) {
             }
 
             setMercMode(npc, mode);
-            if (mode == MercMode.FOLLOW) {
-                // Whoever issued the command becomes the leader being followed (owner or co-owner)
-                setLeaderUuid(npc, owner.getUniqueId());
-            }
 
             MercColor color = getMercColor(npc);
             MercType type = getMercType(npc);
@@ -2581,81 +2416,40 @@ private void handleJackBlackChat(NPC npc, LivingEntity jack) {
     // -------------------------------------------------------------------------
     // Combat target helpers
     // -------------------------------------------------------------------------
-    private LivingEntity findNearestHostile(NPC npc, LivingEntity from, double range) {
-    double r2 = range * range;
-    LivingEntity best = null;
-    double bestD2 = Double.MAX_VALUE;
+    private LivingEntity findNearestHostile(LivingEntity from, double range) {
+        double r2 = range * range;
+        LivingEntity best = null;
+        double bestD2 = Double.MAX_VALUE;
 
-    Collection<Entity> near = from.getWorld().getNearbyEntities(from.getLocation(), range, range, range);
-    for (Entity e : near) {
-        if (!(e instanceof LivingEntity le)) continue;
-        if (le.isDead() || !le.isValid()) continue;
+        Collection<Entity> near = from.getWorld().getNearbyEntities(from.getLocation(), range, range, range);
+        for (Entity e : near) {
+            if (!(e instanceof LivingEntity le)) continue;
+            if (le.isDead() || !le.isValid()) continue;
+            if (le instanceof Player) continue;
 
-        if (!isHostileMob(le)) continue;
-        if (shouldIgnoreHostileTarget(le)) continue;
+            // Hostile mobs = Monster (includes many), plus some special cases
+            boolean hostile = (le instanceof Monster);
+            if (!hostile) continue;
 
-        // Don't target Citizens NPCs or our mercs
-        if (isCitizensNpcEntity(le)) continue;
-        NPC other = CitizensAPI.getNPCRegistry().getNPC(le);
-        if (other != null && isOurNpc(other, le)) continue;
+// Ignore named mobs or mobs sitting in boats/minecarts
+try {
+    if (le.getCustomName() != null) continue;
+    Entity vehicle = le.getVehicle();
+    if (vehicle instanceof Boat || vehicle instanceof Minecart) continue;
+} catch (Throwable ignored) {}
 
-        // must be in LOS when possible
-        try {
-            if (!from.hasLineOfSight(le)) continue;
-        } catch (Throwable ignored) {}
+// Must have line of sight
+try { if (!from.hasLineOfSight(le)) continue; } catch (Throwable ignored) {}
 
-        double d2 = le.getLocation().distanceSquared(from.getLocation());
-        if (d2 > r2) continue;
 
-        // Try to ensure we can actually path to it (best-effort)
-        if (npc != null && npc.isSpawned()) {
-            if (!canNavigatorReach(npc, le.getLocation())) continue;
+            double d2 = le.getLocation().distanceSquared(from.getLocation());
+            if (d2 <= r2 && d2 < bestD2) {
+                bestD2 = d2;
+                best = le;
+            }
         }
-
-        if (d2 < bestD2) {
-            bestD2 = d2;
-            best = le;
-        }
+        return best;
     }
-    return best;
-}
-
-private boolean canNavigatorReach(NPC npc, Location target) {
-    try {
-        Navigator nav = npc.getNavigator();
-        if (nav == null) return true;
-        // Citizens has had several variants of canNavigateTo/canNavigate
-        try {
-            java.lang.reflect.Method m = nav.getClass().getMethod("canNavigateTo", Location.class);
-            Object r = m.invoke(nav, target);
-            if (r instanceof Boolean b) return b;
-        } catch (NoSuchMethodException ignored) {}
-        try {
-            java.lang.reflect.Method m = nav.getClass().getMethod("canNavigateTo", org.bukkit.Location.class);
-            Object r = m.invoke(nav, target);
-            if (r instanceof Boolean b) return b;
-        } catch (NoSuchMethodException ignored) {}
-        return true;
-    } catch (Throwable t) {
-        return true;
-    }
-}
-
-private boolean shouldIgnoreHostileTarget(LivingEntity target) {
-    try {
-        if (target.getCustomName() != null && !target.getCustomName().isEmpty()) return true; // nametag / custom name
-    } catch (Throwable ignored) {}
-
-    try {
-        if (target.isInsideVehicle()) {
-            Entity v = target.getVehicle();
-            if (v instanceof org.bukkit.entity.Boat) return true;
-            if (v instanceof org.bukkit.entity.Minecart) return true;
-        }
-    } catch (Throwable ignored) {}
-
-    return false;
-}
 
     private LivingEntity findNearestEnemyFactionMerc(LivingEntity from, MercColor myColor, double range) {
         double r2 = range * range;
@@ -3102,33 +2896,78 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
     // Dynmap markers.yml fallback (similar to ViridianTownsFolk)
     // -------------------------------------------------------------------------
     private void refreshDynmapMarkersFromFile() {
-    dynmapSpawnMarkers.clear();
-    dynmapFileMarkersAvailable = false;
-    dynmapFileMarkerCount = 0;
-
-    try {
-        File pluginsDir = getDataFolder().getParentFile();
-        File dynmapDir = (pluginsDir == null) ? null : new File(pluginsDir, "dynmap");
-        File file = (dynmapDir == null) ? null : new File(dynmapDir, "markers.yml");
-        dynmapMarkersFile = file;
-
-        if (file == null || !file.isFile()) {
-            if (debugDynmap) getLogger().info("[Dynmap] markers.yml not found at: " + (file == null ? "(null)" : file.getAbsolutePath()));
-            return;
-        }
-
-        int added = parseDynmapMarkersYml(file);
-        dynmapFileMarkerCount = added;
-        dynmapFileMarkersAvailable = added > 0;
-
-        if (debugDynmap) getLogger().info("[Dynmap] markers.yml parsed, eligible markers: " + added);
-    } catch (Throwable ex) {
-        dynmapSpawnMarkers.clear();
         dynmapFileMarkersAvailable = false;
         dynmapFileMarkerCount = 0;
-        if (debugDynmap) getLogger().warning("[Dynmap] Failed to read markers.yml: " + ex.getMessage());
+
+        try {
+            File file = new File("plugins/dynmap/markers.yml");
+            if (!file.exists()) return;
+
+            org.bukkit.configuration.file.YamlConfiguration yc = org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(file);
+            ConfigurationSection sets = yc.getConfigurationSection("sets");
+            if (sets == null) return;
+
+            List<String> required = getConfig().getStringList("dynmapMarkers.requiredLabelContains");
+            List<String> exceptions = getConfig().getStringList("dynmapMarkers.exceptionKeywords");
+            if (required == null) required = Collections.emptyList();
+            if (exceptions == null) exceptions = Collections.emptyList();
+
+            List<Location> found = new ArrayList<>();
+
+            for (String setId : sets.getKeys(false)) {
+                ConfigurationSection setSec = sets.getConfigurationSection(setId);
+                if (setSec == null) continue;
+
+                ConfigurationSection markers = setSec.getConfigurationSection("markers");
+                if (markers == null) continue;
+
+                for (String markerId : markers.getKeys(false)) {
+                    ConfigurationSection m = markers.getConfigurationSection(markerId);
+                    if (m == null) continue;
+
+                    String label = m.getString("label", "");
+                    if (label == null) label = "";
+
+                    String labelLower = label.toLowerCase(Locale.ROOT);
+
+                    boolean reqOk = required.isEmpty();
+                    for (String req : required) {
+                        if (req == null || req.isEmpty()) continue;
+                        if (labelLower.contains(req.toLowerCase(Locale.ROOT))) { reqOk = true; break; }
+                    }
+                    if (!reqOk) continue;
+
+                    boolean blocked = false;
+                    for (String ex : exceptions) {
+                        if (ex == null || ex.isEmpty()) continue;
+                        if (labelLower.contains(ex.toLowerCase(Locale.ROOT))) { blocked = true; break; }
+                    }
+                    if (blocked) continue;
+
+                    String worldName = m.getString("world", null);
+                    if (worldName == null || worldName.isEmpty()) continue;
+                    World w = Bukkit.getWorld(worldName);
+                    if (w == null) continue;
+
+                    double x = m.getDouble("x");
+                    double y = m.getDouble("y");
+                    double z = m.getDouble("z");
+
+                    found.add(new Location(w, x, y, z));
+                }
+            }
+
+            synchronized (dynmapSpawnMarkers) {
+                dynmapSpawnMarkers.clear();
+                dynmapSpawnMarkers.addAll(found);
+            }
+
+            dynmapFileMarkerCount = found.size();
+            dynmapFileMarkersAvailable = dynmapFileMarkerCount > 0;
+        } catch (Throwable ignored) {
+            // silence; status will show MISSING if both API and file fallback fail
+        }
     }
-}
 
 // Dynmap marker spawnpoints (reflection)
     // -------------------------------------------------------------------------
@@ -3186,35 +3025,7 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
     // ------------------------------------------------------------
 
 
-    
-    private Location getStoredPatrolCenter(NPC npc, Location fallback) {
-        try {
-            Object wNameObj = npc.data().get(CIT_KEY_PATROL_WORLD);
-            if (wNameObj == null) return fallback;
-            World w = Bukkit.getWorld(String.valueOf(wNameObj));
-            if (w == null) return fallback;
-
-            Double x = getDoubleData(npc, CIT_KEY_PATROL_X);
-            Double y = getDoubleData(npc, CIT_KEY_PATROL_Y);
-            Double z = getDoubleData(npc, CIT_KEY_PATROL_Z);
-            if (x == null || y == null || z == null) return fallback;
-
-            return new Location(w, x, y, z);
-        } catch (Throwable t) {
-            return fallback;
-        }
-    }
-
-    private Double getDoubleData(NPC npc, String key) {
-        try {
-            Object o = npc.data().get(key);
-            if (o instanceof Number n) return n.doubleValue();
-            if (o instanceof String s) return Double.parseDouble(s);
-        } catch (Throwable ignored) {}
-        return null;
-    }
-
-private void refreshDynmapMarkersFallbackFile() {
+    private void refreshDynmapMarkersFallbackFile() {
         dynmapFileMarkersAvailable = false;
         dynmapSpawnMarkers.clear();
 
@@ -3234,135 +3045,75 @@ private void refreshDynmapMarkersFallbackFile() {
         dynmapFileMarkersAvailable = added > 0;
     }
 
+    private int parseDynmapMarkersYml(File f, List<String> requiredContains, List<String> exceptionKeywords) {
+        int added = 0;
 
-    private int parseDynmapMarkersYml(File f) {
-    int added = 0;
+        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
+            String line;
 
-    List<String> required = getConfig().getStringList("dynmapMarkers.requiredLabelContains");
-    List<String> except = getConfig().getStringList("dynmapMarkers.exceptionKeywords");
+            String label = null;
+            String world = null;
+            Integer x = null;
+            Integer z = null;
 
-    // Normalize filters
-    List<String> requiredLower = new ArrayList<>();
-    if (required != null) for (String s : required) if (s != null && !s.trim().isEmpty()) requiredLower.add(s.trim().toLowerCase(Locale.ROOT));
-    List<String> exceptLower = new ArrayList<>();
-    if (except != null) for (String s : except) if (s != null && !s.trim().isEmpty()) exceptLower.add(s.trim().toLowerCase(Locale.ROOT));
+            while ((line = br.readLine()) != null) {
+                String t = line.trim();
 
-    String currentLabel = null;
-    String currentWorld = null;
-    Double currentX = null, currentY = null, currentZ = null;
-
-    try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), StandardCharsets.UTF_8))) {
-        String line;
-        while ((line = br.readLine()) != null) {
-            String s = line.trim();
-            if (s.isEmpty() || s.startsWith("#")) continue;
-
-            // marker id header: "<id>:"
-            if (!s.startsWith("-") && s.endsWith(":") && s.indexOf(' ') < 0 && s.indexOf('\t') < 0) {
-                // commit previous marker if complete
-                if (currentLabel != null && currentWorld != null && currentX != null && currentY != null && currentZ != null) {
-                    int r = maybeAddDynmapMarker(currentLabel, currentWorld, currentX, currentY, currentZ, requiredLower, exceptLower);
-                    if (r > 0) added += r;
+                // marker id header line like "someid:"
+                if (t.endsWith(":") && !t.startsWith("-") && !t.startsWith("label:") && !t.startsWith("world:")) {
+                    // flush previous
+                    if (label != null && world != null && x != null && z != null) {
+                        if (labelPassesFilters(label, requiredContains, exceptionKeywords)) {
+                            World w = Bukkit.getWorld(world);
+                            if (w != null) {
+                                int y = w.getHighestBlockYAt(x, z) + 1;
+                                dynmapSpawnMarkers.add(new Location(w, x + 0.5, y, z + 0.5));
+                                added++;
+                            }
+                        }
+                    }
+                    label = null; world = null; x = null; z = null;
+                    continue;
                 }
-                currentLabel = null;
-                currentWorld = null;
-                currentX = currentY = currentZ = null;
-                continue;
+
+                if (t.startsWith("label:")) {
+                    label = stripQuotes(t.substring("label:".length()).trim());
+                    continue;
+                }
+                if (t.startsWith("world:")) {
+                    world = stripQuotes(t.substring("world:".length()).trim());
+                    continue;
+                }
+                if (t.startsWith("x:")) {
+                    x = tryParseInt(stripQuotes(t.substring("x:".length()).trim()));
+                    continue;
+                }
+                if (t.startsWith("z:")) {
+                    z = tryParseInt(stripQuotes(t.substring("z:".length()).trim()));
+                    continue;
+                }
             }
 
-            if (s.startsWith("label:")) {
-                currentLabel = stripQuotes(s.substring("label:".length()).trim());
-                continue;
+            // flush at EOF
+            if (label != null && world != null && x != null && z != null) {
+                if (labelPassesFilters(label, requiredContains, exceptionKeywords)) {
+                    World w = Bukkit.getWorld(world);
+                    if (w != null) {
+                        int y = w.getHighestBlockYAt(x, z) + 1;
+                        dynmapSpawnMarkers.add(new Location(w, x + 0.5, y, z + 0.5));
+                        added++;
+                    }
+                }
             }
-            if (s.startsWith("world:")) {
-                currentWorld = stripQuotes(s.substring("world:".length()).trim());
-                continue;
-            }
-            if (s.startsWith("x:")) {
-                currentX = parseDoubleSafe(s.substring("x:".length()).trim());
-                continue;
-            }
-            if (s.startsWith("y:")) {
-                currentY = parseDoubleSafe(s.substring("y:".length()).trim());
-                continue;
-            }
-            if (s.startsWith("z:")) {
-                currentZ = parseDoubleSafe(s.substring("z:".length()).trim());
-                continue;
-            }
+
+        } catch (Throwable ex) {
+            if (getConfig().getBoolean("debug", false)) {
+				getLogger().warning("Failed to parse dynmap markers.yml: " + ex.getMessage());
+			}
         }
-    } catch (IOException ex) {
-        if (debugDynmap) getLogger().warning("Failed to parse dynmap markers.yml: " + ex.getMessage());
-        return 0;
+
+        return added;
     }
-
-    // commit last marker
-    if (currentLabel != null && currentWorld != null && currentX != null && currentY != null && currentZ != null) {
-        int r = maybeAddDynmapMarker(currentLabel, currentWorld, currentX, currentY, currentZ, requiredLower, exceptLower);
-        if (r > 0) added += r;
-    }
-
-    return added;
-}
-
-private int maybeAddDynmapMarker(String label, String worldName, double x, double y, double z,
-                                List<String> requiredLower, List<String> exceptLower) {
-    if (label == null) return 0;
-
-    String labelLower = label.toLowerCase(Locale.ROOT);
-
-    // required substring filter
-    if (requiredLower != null && !requiredLower.isEmpty()) {
-        boolean ok = false;
-        for (String req : requiredLower) {
-            if (req != null && !req.isEmpty() && labelLower.contains(req)) { ok = true; break; }
-        }
-        if (!ok) return 0;
-    }
-
-    // exception keywords filter
-    if (exceptLower != null && !exceptLower.isEmpty()) {
-        for (String bad : exceptLower) {
-            if (bad != null && !bad.isEmpty() && labelLower.contains(bad)) return 0;
-        }
-    }
-
-    World w = Bukkit.getWorld(worldName);
-    if (w == null) return 0;
-
-    if (Double.isNaN(x) || Double.isNaN(y) || Double.isNaN(z)) return 0;
-
-        Location loc = new Location(w, x, y, z);
-
-    // sanity: ensure block is loaded when used; we just store the location here.
-    dynmapSpawnMarkers.add(loc);
-    return 1;
-}
-
-private double parseDoubleSafe(String s) {
-    try { return Double.parseDouble(s); } catch (Throwable t) { return Double.NaN; }
-}
-
-    
-
-    private Double tryParseDouble(String s) {
-        try { return Double.parseDouble(s); } catch (Throwable t) { return null; }
-    }
-
-    private String extractInlineValue(String s, String key) {
-        if (s == null) return null;
-        Pattern p = Pattern.compile("\\b" + Pattern.quote(key) + "\\s*:\\s*([^,}]+)");
-        Matcher m = p.matcher(s);
-        if (!m.find()) return null;
-        return stripQuotes(m.group(1).trim());
-    }
-
-    private Double extractInlineDouble(String s, String key) {
-        String v = extractInlineValue(s, key);
-        if (v == null) return null;
-        return tryParseDouble(v);
-    }
-
 
     private boolean labelPassesFilters(String label, List<String> requiredContains, List<String> exceptionKeywords) {
         String lower = label.toLowerCase(Locale.ROOT);
@@ -3410,6 +3161,9 @@ private double parseDoubleSafe(String s) {
 
         int ticks = Math.max(100, getConfig().getInt("dynmapMarkers.refreshTicks", 600));
         dynmapRefreshTaskId = Bukkit.getScheduler().scheduleSyncRepeatingTask(this, this::refreshDynmapMarkers, 40L, ticks);
+
+        // Prime marker list immediately so /mercs status is accurate right away.
+        Bukkit.getScheduler().runTaskLater(this, this::refreshDynmapMarkers, 1L);
     }
 
     @SuppressWarnings("unchecked")
@@ -3608,24 +3362,22 @@ private double parseDoubleSafe(String s) {
         };
     }
 
-
     private void setMercMode(NPC npc, MercMode mode) {
-        // Persist mode, but also immediately cancel any existing navigation so behavior changes take effect right away.
-        try {
-            npc.data().setPersistent(CIT_KEY_MODE, switch (mode) {
-                case DEFEND -> "defend";
-                case PATROL -> "patrol";
-                default -> "follow";
-            });
-        } catch (Throwable ignored) {}
+    String old = safeLower(npc.data().get(CIT_KEY_MODE), "follow");
+    String next = switch (mode) {
+        case DEFEND -> "defend";
+        case PATROL -> "patrol";
+        default -> "follow";
+    };
+    npc.data().setPersistent(CIT_KEY_MODE, next);
 
+    if (!old.equals(next)) {
         try {
             Navigator nav = npc.getNavigator();
-            if (nav != null) {
-                try { nav.cancelNavigation(); } catch (Throwable ignored) {}
-            }
+            if (nav != null && nav.isNavigating()) nav.cancelNavigation();
         } catch (Throwable ignored) {}
     }
+}
 
 
     private boolean isBowman(NPC npc) {
@@ -3663,61 +3415,6 @@ private double parseDoubleSafe(String s) {
         try { return UUID.fromString(s.trim()); }
         catch (Throwable ignored) { return null; }
     }
-
-private UUID getLeaderUuid(NPC npc) {
-    try {
-        String s = npc.data().get(CIT_KEY_LEADER);
-        if (s != null && !s.trim().isEmpty()) return UUID.fromString(s.trim());
-    } catch (Throwable ignored) {}
-    return null;
-}
-
-private void setLeaderUuid(NPC npc, UUID leader) {
-    try {
-        if (leader == null) npc.data().remove(CIT_KEY_LEADER);
-        else npc.data().setPersistent(CIT_KEY_LEADER, leader.toString());
-    } catch (Throwable ignored) {}
-}
-
-private Set<UUID> getCoOwnerUuids(NPC npc) {
-    Set<UUID> out = new HashSet<>();
-    try {
-        String raw = npc.data().get(CIT_KEY_SHARED);
-        if (raw == null || raw.trim().isEmpty()) return out;
-        for (String part : raw.split(",")) {
-            String t = part.trim();
-            if (t.isEmpty()) continue;
-            try { out.add(UUID.fromString(t)); } catch (Throwable ignored) {}
-        }
-    } catch (Throwable ignored) {}
-    return out;
-}
-
-private void setCoOwnerUuids(NPC npc, Set<UUID> uuids) {
-    try {
-        if (uuids == null || uuids.isEmpty()) {
-            npc.data().remove(CIT_KEY_SHARED);
-            return;
-        }
-        StringBuilder sb = new StringBuilder();
-        boolean first = true;
-        for (UUID u : uuids) {
-            if (u == null) continue;
-            if (!first) sb.append(",");
-            first = false;
-            sb.append(u.toString());
-        }
-        npc.data().setPersistent(CIT_KEY_SHARED, sb.toString());
-    } catch (Throwable ignored) {}
-}
-
-private boolean isOwnerOrCoOwner(NPC npc, UUID playerUuid) {
-    if (playerUuid == null) return false;
-    UUID owner = getOwnerUuid(npc);
-    if (owner == null) return false;
-    if (owner.equals(playerUuid)) return true;
-    return getCoOwnerUuids(npc).contains(playerUuid);
-}
 
     private void setOwnerUuid(NPC npc, UUID owner) {
         npc.data().setPersistent(CIT_KEY_OWNER, owner.toString());
