@@ -17,6 +17,12 @@ import org.bukkit.entity.LivingEntity;
 import org.bukkit.event.*;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
+import org.bukkit.event.player.AsyncPlayerChatEvent;
+import org.bukkit.block.Block;
+import org.bukkit.block.data.BlockData;
+import org.bukkit.block.data.Openable;
+import org.bukkit.block.data.type.Door;
+import org.bukkit.block.data.type.Gate;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
@@ -85,6 +91,11 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
     private NamespacedKey KEY_VTF_ROLE;
     private NamespacedKey KEY_VTF_SITE;
     private NamespacedKey KEY_VTF_VER;
+    private NamespacedKey KEY_VTF_NAME;      // generated personal name
+    private NamespacedKey KEY_VTF_SUBROLE;   // optional: worker:farmer/smith/mason/carpenter
+    private NamespacedKey KEY_VTF_TASK;      // current task hint for contextual dialogue
+    private NamespacedKey KEY_VTF_IDLE_UNTIL; // tick until which NPC should linger/idle
+    private NamespacedKey KEY_VTF_EXPECT_IDLE; // flag set when a target was chosen and we want to linger on arrival
 
     private static final String SCORE_TAG = "vtf_managed";
 
@@ -141,6 +152,10 @@ private int skinEnforceTaskId = -1;
 
 private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
 
+// Approximate server tick counter (Spigot API doesn't expose Bukkit.getCurrentTick())
+private long approxServerTick = 0L;
+private BukkitTask approxServerTickTask = null;
+
 
     /* ============================================================
      *  Legacy/adoption heuristics and exclusions
@@ -174,6 +189,34 @@ private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
 
     // Autonomy tasks keyed by NPC id
     private final Map<Integer, BukkitTask> autonomyTasks = new HashMap<>();
+
+    // Fast pulse task (doors/gates, swimming nudges, lightweight routines)
+    private BukkitTask behaviorPulseTask;
+    private int behaviorPulsePerTick = 16; // cap per pulse to avoid spikes
+    private int behaviorPulseCursor = 0;
+
+    // Door/gate open-close tracking
+    private final Map<String, Long> openedBlocksCloseAtTick = new HashMap<>();
+
+    // Simple interactive dialogue sessions (player -> session)
+    private static final class ConversationSession {
+        final int npcId;
+        String topic;
+        int step;
+        long expiresAtMs;
+        BukkitTask lookTask;
+        boolean lockEnabled;
+
+        ConversationSession(int npcId, String topic, int step, long expiresAtMs) {
+            this.npcId = npcId;
+            this.topic = topic;
+            this.step = step;
+            this.expiresAtMs = expiresAtMs;
+        }
+    }
+    private final Map<UUID, ConversationSession> conversations = new HashMap<>();
+
+    private BukkitTask conversationCleanupTask;
 
     // Player scan throttle
     private final Map<UUID, Long> lastWakeScanMs = new HashMap<>();
@@ -239,6 +282,10 @@ private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
     // Site anchor leash (if they drift too far from site center, guide back)
     private int returnToSiteDistance = 56;
 
+    // Behavior pulse
+    private boolean interactiveDialogueEnabled = true;
+    private int dialogueSessionSeconds = 45;
+
     /* ============================================================
      *  Enable/disable
      * ============================================================ */
@@ -249,6 +296,11 @@ private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
         KEY_VTF_ROLE = new NamespacedKey(this, "vtf_role");
         KEY_VTF_SITE = new NamespacedKey(this, "vtf_site");
         KEY_VTF_VER = new NamespacedKey(this, "vtf_ver");
+        KEY_VTF_NAME = new NamespacedKey(this, "vtf_name");
+        KEY_VTF_SUBROLE = new NamespacedKey(this, "vtf_subrole");
+        KEY_VTF_TASK = new NamespacedKey(this, "vtf_task");
+        KEY_VTF_IDLE_UNTIL = new NamespacedKey(this, "vtf_idle_until");
+        KEY_VTF_EXPECT_IDLE = new NamespacedKey(this, "vtf_expect_idle");
         KEY_VTF_SKIN = new NamespacedKey(this, "vtf_skin");
 
         ensureConfigFile();
@@ -273,12 +325,18 @@ startSkinTasks();
 
         startSpawnQueueWorker();
         startPopulationMaintainer();
+        startApproxServerTickCounter();
+        startBehaviorPulse();
+        startConversationCleanupTask();
 
         // Startup wake for already-spawned NPCs (safe: Citizens registry iteration only)
         Bukkit.getScheduler().runTaskLater(this, () -> {
             int woke = wakeAllSpawned("startup");
             getLogger().info("Startup wake: " + woke);
         }, 40L);
+
+        // Best-effort rename/migrate managed NPCs that are already spawned.
+        Bukkit.getScheduler().runTaskLater(this, this::migrateSpawnedManagedNpcs, 60L);
 
         // Citizens sometimes spawns NPCs later; do a couple late sweeps
         Bukkit.getScheduler().runTaskLater(this, () -> wakeAllSpawned("startup-late"), 20L * 10L);
@@ -294,6 +352,36 @@ startSkinTasks();
 
         if (spawnQueueTask != null) spawnQueueTask.cancel();
         spawnQueueTask = null;
+
+        if (behaviorPulseTask != null) behaviorPulseTask.cancel();
+        behaviorPulseTask = null;
+
+        if (approxServerTickTask != null) approxServerTickTask.cancel();
+        approxServerTickTask = null;
+
+        if (conversationCleanupTask != null) conversationCleanupTask.cancel();
+        conversationCleanupTask = null;
+
+        synchronized (conversations) {
+            for (ConversationSession s : conversations.values()) {
+                if (s != null && s.lookTask != null) {
+                    try { s.lookTask.cancel(); } catch (Throwable ignored) {}
+                }
+            }
+            conversations.clear();
+        }
+
+        if (conversationCleanupTask != null) conversationCleanupTask.cancel();
+        conversationCleanupTask = null;
+
+        synchronized (conversations) {
+            for (ConversationSession s : conversations.values()) {
+                if (s != null && s.lookTask != null) {
+                    try { s.lookTask.cancel(); } catch (Throwable ignored) {}
+                }
+            }
+            conversations.clear();
+        }
 
         for (BukkitTask t : autonomyTasks.values()) {
             try { t.cancel(); } catch (Throwable ignored) {}
@@ -324,6 +412,7 @@ startSkinTasks();
             sender.sendMessage(ChatColor.GRAY + "/vtf stats        - show counts");
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadsites  - reload sites from markers.yml + sites.txt");
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadconfig - reload config.yml");
+            sender.sendMessage(ChatColor.GRAY + "/vtf migrate      - rename/update spawned VTF NPCs (back-compat)");
             return true;
         }
 
@@ -389,6 +478,11 @@ startSkinTasks();
             case "reloadconfig": {
                 loadConfigValues();
                 sender.sendMessage(ChatColor.GREEN + "Reloaded config.yml.");
+                return true;
+            }
+            case "migrate": {
+                int updated = migrateSpawnedManagedNpcs();
+                sender.sendMessage(ChatColor.GREEN + "Migrated/updated spawned VTF NPCs: " + updated);
                 return true;
             }
             default:
@@ -497,7 +591,13 @@ startSkinTasks();
         if (!isManagedNpc(npc) || isExcludedNpc(npc)) return;
 
         wakeNpc(npc, "interact");
-        e.getPlayer().sendMessage(ChatColor.GRAY + pickDialogue(npc));
+
+        if (!interactiveDialogueEnabled) {
+            e.getPlayer().sendMessage(ChatColor.GRAY + pickDialogue(npc));
+            return;
+        }
+
+        beginConversation(e.getPlayer(), npc);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -577,6 +677,383 @@ startSkinTasks();
         return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
     }
 
+    String pickFarewell(String role) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Stay safe out there.");
+        lines.add("Mind the roads.");
+        lines.add("Until we meet again.");
+
+        if ("guard".equals(role)) {
+            lines.add("Move along.");
+            lines.add("Keep your head down.");
+            lines.add("No trouble, understood?");
+        } else if ("worker".equals(role)) {
+            lines.add("Back to it, then.");
+            lines.add("Work waits for no one.");
+        } else if ("priest".equals(role)) {
+            lines.add("May order keep you.");
+            lines.add("Walk in the light.");
+        } else if ("scholar".equals(role)) {
+            lines.add("Come back with questions.");
+            lines.add("Knowledge favors the curious.");
+        } else if ("dockhand".equals(role)) {
+            lines.add("Tide’s turning. I’ve work.");
+            lines.add("Watch your step on the boards.");
+        } else if ("ranger".equals(role)) {
+            lines.add("Don’t stray from the paths.");
+            lines.add("The woods listen.");
+        } else if ("hermit".equals(role)) {
+            lines.add("Leave me to my quiet.");
+            lines.add("Go. Before the wind changes.");
+        }
+
+        return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
+    }
+
+
+    
+    private void startConversationCleanupTask() {
+        if (conversationCleanupTask != null) {
+            try { conversationCleanupTask.cancel(); } catch (Throwable ignored) {}
+            conversationCleanupTask = null;
+        }
+
+        // Every second, expire stale sessions so NPCs stop "staring" if the player goes silent.
+        conversationCleanupTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            long now = System.currentTimeMillis();
+            List<UUID> toEnd = new ArrayList<>();
+
+            synchronized (conversations) {
+                for (Map.Entry<UUID, ConversationSession> e : conversations.entrySet()) {
+                    UUID playerId = e.getKey();
+                    ConversationSession s = e.getValue();
+                    if (s == null) { toEnd.add(playerId); continue; }
+                    if (s.expiresAtMs <= now) { toEnd.add(playerId); continue; }
+                    Player p = Bukkit.getPlayer(playerId);
+                    if (p == null || !p.isOnline()) { toEnd.add(playerId); }
+                }
+            }
+
+            for (UUID playerId : toEnd) {
+                endConversation(playerId, false, "(They fall silent.)");
+            }
+        }, 40L, 20L);
+    }
+
+    private void endConversation(UUID playerId, boolean sendMessage, String message) {
+        if (playerId == null) return;
+
+        ConversationSession session;
+        synchronized (conversations) {
+            session = conversations.remove(playerId);
+        }
+        if (session == null) return;
+
+        session.lockEnabled = false;
+
+        if (session.lookTask != null) {
+            try { session.lookTask.cancel(); } catch (Throwable ignored) {}
+            session.lookTask = null;
+        }
+
+        if (sendMessage) {
+            Player p = Bukkit.getPlayer(playerId);
+            if (p != null && p.isOnline() && message != null && !message.isBlank()) {
+                p.sendMessage(ChatColor.DARK_GRAY + message);
+            }
+        }
+    }
+
+    private BukkitTask startNpcLookTask(Player player, NPC npc, ConversationSession session) {
+    if (player == null || npc == null || session == null) return null;
+
+    // Lock the NPC in place and keep them facing the player while the conversation is active.
+    session.lockEnabled = true;
+
+    return Bukkit.getScheduler().runTaskTimer(this, () -> {
+        if (!session.lockEnabled) return;
+
+        if (!player.isOnline()) {
+            endConversation(player.getUniqueId(), false, null);
+            return;
+        }
+        if (!npc.isSpawned() || npc.getEntity() == null) {
+            endConversation(player.getUniqueId(), false, null);
+            return;
+        }
+        if (session.expiresAtMs <= System.currentTimeMillis()) {
+            endConversation(player.getUniqueId(), true, "(No reply.)");
+            return;
+        }
+
+        try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
+
+        Entity ent = npc.getEntity();
+        if (ent instanceof LivingEntity) {
+            try {
+                Vector vel = ((LivingEntity) ent).getVelocity();
+                ((LivingEntity) ent).setVelocity(new Vector(0, vel.getY(), 0));
+            } catch (Throwable ignored) {}
+        }
+
+        // Citizens rotates NPCs without needing teleport tricks.
+        try { npc.faceLocation(player.getLocation()); } catch (Throwable ignored) {}
+    }, 1L, 1L);
+}
+
+@EventHandler(priority = EventPriority.HIGHEST)
+    public void onPlayerChat(AsyncPlayerChatEvent e) {
+        if (!enabled) return;
+        if (!interactiveDialogueEnabled) return;
+
+        UUID playerId = e.getPlayer().getUniqueId();
+        ConversationSession session;
+        synchronized (conversations) {
+            session = conversations.get(playerId);
+        }
+        if (session == null) return;
+
+        long now = System.currentTimeMillis();
+        if (session.expiresAtMs < now) {
+            Bukkit.getScheduler().runTask(this, () -> endConversation(playerId, false, null));
+            return;
+        }
+
+        // Prevent public chat spam while in a conversation.
+        e.setCancelled(true);
+
+        String msgRaw = e.getMessage();
+        String msg = (msgRaw == null) ? "" : msgRaw.trim().toLowerCase(Locale.ROOT);
+        if (msg.isBlank()) return;
+
+        Bukkit.getScheduler().runTask(this, () -> {
+            try { continueConversation(e.getPlayer(), session, msg); } catch (Throwable ignored) {}
+        });
+    }
+
+    private void beginConversation(Player player, NPC npc) {
+        if (player == null || npc == null || !npc.isSpawned()) return;
+
+        // If the player was already talking to someone, end that session cleanly.
+        endConversation(player.getUniqueId(), false, null);
+
+        Entity ent = npc.getEntity();
+        if (ent == null) return;
+
+        // Ensure identity data exists (back-compat and new spawns)
+        ensureIdentityAndName(npc, ent, false);
+
+        String role = getRole(ent);
+        String subrole = getSubrole(ent);
+        String who = npc.getName();
+
+        Site origin = getSite(ent);
+        Site near = findNearestSite(ent.getLocation(), 4096);
+        String originName = (origin != null) ? origin.name : (near != null ? near.name : "these lands");
+        String nearName = (near != null) ? near.name : originName;
+
+        String opener = buildOpenerLine(role, subrole, originName, nearName);
+        player.sendMessage(ChatColor.GRAY + who + ": " + opener);
+        player.sendMessage(ChatColor.DARK_GRAY + "(Reply with: rumors, directions, work, empire, or bye)");
+
+        long exp = System.currentTimeMillis() + (long) dialogueSessionSeconds * 1000L;
+        ConversationSession sess = new ConversationSession(npc.getId(), "root", 0, exp);
+        synchronized (conversations) {
+            conversations.put(player.getUniqueId(), sess);
+        }
+        sess.lookTask = startNpcLookTask(player, npc, sess);
+    }
+
+    private void continueConversation(Player player, ConversationSession session, String msg) {
+        if (player == null || session == null) return;
+
+        NPC npc = CitizensAPI.getNPCRegistry().getById(session.npcId);
+        if (npc == null || !npc.isSpawned()) {
+            synchronized (conversations) {
+                conversations.remove(player.getUniqueId());
+            }
+            player.sendMessage(ChatColor.DARK_GRAY + "(No response.)");
+            return;
+        }
+
+        Entity ent = npc.getEntity();
+        if (ent == null) return;
+        ensureIdentityAndName(npc, ent, false);
+
+        String role = getRole(ent);
+        String subrole = getSubrole(ent);
+        Site origin = getSite(ent);
+        Site near = findNearestSite(ent.getLocation(), 4096);
+        String originName = (origin != null) ? origin.name : (near != null ? near.name : "these lands");
+        String nearName = (near != null) ? near.name : originName;
+
+        // Extend session
+        session.expiresAtMs = System.currentTimeMillis() + (long) dialogueSessionSeconds * 1000L;
+
+        if (containsAny(msg, "bye", "goodbye", "farewell", "later", "leave", "stop")) {
+            player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + pickFarewell(role));
+            endConversation(player.getUniqueId(), false, null);
+            return;
+        }
+
+        if (containsAny(msg, "directions", "where", "how do", "map", "road", "route")) {
+            player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + directionsLine(role, originName, nearName));
+            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, work, empire, or bye)");
+            return;
+        }
+
+        if (containsAny(msg, "rumor", "rumors", "gossip", "hear", "news")) {
+            player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + rumorLine(role, originName, nearName));
+            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: directions, work, empire, or bye)");
+            return;
+        }
+
+        if (containsAny(msg, "work", "job", "help", "task", "hire")) {
+            player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + workLine(role, subrole, originName, nearName));
+            player.sendMessage(ChatColor.DARK_GRAY + "(Say: yes, no, or ask about rumors/directions)");
+            session.topic = "work";
+            session.step = 1;
+            return;
+        }
+
+        if (session.topic.equals("work") && session.step == 1) {
+            if (containsAny(msg, "yes", "yea", "yeah", "yep", "sure", "ok")) {
+                player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + acceptWorkLine(role, subrole, originName, nearName));
+                session.topic = "root";
+                session.step = 0;
+                player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, empire, or bye)");
+                return;
+            }
+            if (containsAny(msg, "no", "nah", "nope")) {
+                player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + declineWorkLine(role));
+                session.topic = "root";
+                session.step = 0;
+                player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, empire, or bye)");
+                return;
+            }
+        }
+
+        if (containsAny(msg, "empire", "viridia", "law", "order", "king", "queen", "emperor", "tax")) {
+            player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + empireLine(role, originName, nearName));
+            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, work, or bye)");
+            return;
+        }
+
+        player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + fallbackLine(role));
+        player.sendMessage(ChatColor.DARK_GRAY + "(Try: rumors, directions, work, empire, or bye)");
+    }
+
+    private boolean containsAny(String msg, String... needles) {
+        if (msg == null) return false;
+        for (String n : needles) {
+            if (n == null || n.isBlank()) continue;
+            if (msg.contains(n)) return true;
+        }
+        return false;
+    }
+
+    private String buildOpenerLine(String role, String subrole, String originName, String nearName) {
+        boolean mentionOrigin = ThreadLocalRandom.current().nextDouble() < 0.70;
+        String place = mentionOrigin ? originName : nearName;
+
+        if ("guard".equals(role)) {
+            return "Keep the peace and mind your hands. The watch answers for " + place + ".";
+        }
+        if ("priest".equals(role)) {
+            return "Peace upon you. The lectern at " + place + " never lacks a seeker.";
+        }
+        if ("scholar".equals(role)) {
+            return "If you have questions, speak plain. Records from " + place + " are... incomplete.";
+        }
+        if ("dockhand".equals(role)) {
+            return "Winds shift fast near " + place + ". Don’t linger by the water at night.";
+        }
+        if ("worker".equals(role)) {
+            if ("farmer".equalsIgnoreCase(subrole)) return "Fields don't tend themselves. " + place + " eats what we grow.";
+            if ("smith".equalsIgnoreCase(subrole)) return "Iron is honest if you treat it right. " + place + " needs nails and blades.";
+            if ("mason".equalsIgnoreCase(subrole)) return "Stone remembers. " + place + " is built on careful cuts.";
+            if ("carpenter".equalsIgnoreCase(subrole)) return "Wood is kinder than stone. " + place + " still creaks in the wind.";
+            return "Work is work. Speak quick.";
+        }
+
+        if ("ranger".equals(role)) {
+            return "Trail’s thin beyond " + place + ". Keep to paths if you value daylight.";
+        }
+        if ("hermit".equals(role)) {
+            return "I keep my counsel. But you’ve walked far, and that counts for something.";
+        }
+        return "You look like you’ve got a question. Ask.";
+    }
+
+    private String rumorLine(String role, String originName, String nearName) {
+        String place = (ThreadLocalRandom.current().nextDouble() < 0.55) ? nearName : originName;
+        List<String> r = new ArrayList<>();
+        r.add("They say old tunnels under " + place + " still breathe at night.");
+        r.add("A wagon went missing on the road to " + place + ". No tracks, just... silence.");
+        r.add("Someone keeps lighting candles where no shrine stands. Near " + place + ".");
+        if ("guard".equals(role)) r.add("If you hear bells with no hands to pull them, leave the street.");
+        if ("priest".equals(role)) r.add("Prayer helps, but locks help more. Keep both.");
+        if ("scholar".equals(role)) r.add("There are pages torn from the register. Not burned. Taken.");
+        return r.get(ThreadLocalRandom.current().nextInt(r.size()));
+    }
+
+    private String directionsLine(String role, String originName, String nearName) {
+        String to = (ThreadLocalRandom.current().nextDouble() < 0.50) ? nearName : originName;
+        if ("ranger".equals(role)) {
+            return "Follow the worn ground and keep the sun on your shoulder. " + to + " lies where the paths thicken.";
+        }
+        return "If you can see a marker for " + to + ", you’re already close. Keep to the travelled ground.";
+    }
+
+    private String workLine(String role, String subrole, String originName, String nearName) {
+        String place = (ThreadLocalRandom.current().nextDouble() < 0.55) ? nearName : originName;
+        if ("guard".equals(role)) return "Keep your eyes open near " + place + ". If you see trouble, shout before you swing.";
+        if ("priest".equals(role)) return "Bring candles or books to the lectern at " + place + ". Order matters.";
+        if ("scholar".equals(role)) return "If you find odd carvings or fragments, report them. Names and dates, not stories.";
+        if ("worker".equals(role)) {
+            if ("farmer".equalsIgnoreCase(subrole)) return "If crops are ripe, harvest and leave seed behind. We replant what we take.";
+            if ("smith".equalsIgnoreCase(subrole)) return "Coal and iron. That’s all a forge asks. Bring what you find.";
+            if ("mason".equalsIgnoreCase(subrole)) return "Clear rubble and keep stone stacked. " + place + " is always settling.";
+            if ("carpenter".equalsIgnoreCase(subrole)) return "Planks, fences, hinges. Keep doors standing.";
+            return "Haul what you can and don’t break what you can’t replace.";
+        }
+        return "Help where you can. " + place + " remembers who does.";
+    }
+
+    private String acceptWorkLine(String role, String subrole, String originName, String nearName) {
+        if ("guard".equals(role)) return "Good. Keep your blade down until it’s needed.";
+        if ("priest".equals(role)) return "Then go with steadiness. Speak with respect and listen twice.";
+        if ("scholar".equals(role)) return "Bring facts. I can’t use fear.";
+        if ("worker".equals(role)) {
+            if ("farmer".equalsIgnoreCase(subrole)) return "Harvest clean. Replant what you cut. Store what you spare.";
+            return "Keep your hands busy and your eyes open.";
+        }
+        return "Fair enough. Walk safe.";
+    }
+
+    private String declineWorkLine(String role) {
+        if ("guard".equals(role)) return "Then don’t make my job harder.";
+        if ("priest".equals(role)) return "No shame in caution. Just don’t mock what you don’t understand.";
+        return "Suit yourself.";
+    }
+
+    private String empireLine(String role, String originName, String nearName) {
+        List<String> lines = new ArrayList<>();
+        lines.add("Viridia holds because law holds. Chaos is easy. Order is built.");
+        lines.add("The Empire isn’t just banners. It’s roads, ledgers, and the promise that someone answers for harm.");
+        lines.add("We’re not perfect. But we’re still here, and that counts.");
+        if ("guard".equals(role)) lines.add("If you break the peace, you answer. Simple as that.");
+        if ("priest".equals(role)) lines.add("Belief without duty is noise. Duty without belief is rot.");
+        if ("scholar".equals(role)) lines.add("Empires fall when they forget their records. That’s why I write.");
+        return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
+    }
+
+    private String fallbackLine(String role) {
+        if ("hermit".equals(role)) return "Words are cheap. Leave me.";
+        if ("guard".equals(role)) return "I don’t have time for riddles. Speak plain.";
+        return "I’m not sure what you mean. Try asking for rumors, directions, work, or the Empire.";
+    }
+
     /* ============================================================
      *  Wake/rehook and autonomy
      * ============================================================ */
@@ -617,6 +1094,7 @@ startSkinTasks();
 
         applyNameplatePolicy(ent);
         ensureRoleAndSite(ent, npc.getName());
+        ensureIdentityAndName(npc, ent, false);
 
         int id = npc.getId();
         if (!autonomyTasks.containsKey(id)) {
@@ -726,6 +1204,426 @@ startSkinTasks();
         }, 1L, 1L);
     }
 
+    private void startBehaviorPulse() {
+        if (behaviorPulseTask != null) behaviorPulseTask.cancel();
+
+        // Run fairly often, but cap work each pulse.
+        behaviorPulseTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            try {
+                behaviorPulseTick();
+            } catch (Throwable ignored) {
+            }
+        }, 5L, 5L);
+    }
+
+
+    void startApproxServerTickCounter() {
+        if (approxServerTickTask != null) {
+            approxServerTickTask.cancel();
+            approxServerTickTask = null;
+        }
+        // Count ticks on the main thread. This is an approximation but stable enough for timeouts and door auto-close.
+        approxServerTickTask = Bukkit.getScheduler().runTaskTimer(this, () -> {
+            approxServerTick++;
+        }, 1L, 1L);
+    }
+
+    long getApproxServerTick() {
+        return approxServerTick;
+    }
+
+    private void behaviorPulseTick() {
+        int max = Math.max(4, behaviorPulsePerTick);
+
+        // Snapshot ids to avoid iterator oddities if Citizens changes under us.
+        List<NPC> spawned = new ArrayList<>();
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (!npc.isSpawned()) continue;
+            if (!isManagedNpc(npc) || isExcludedNpc(npc)) continue;
+            spawned.add(npc);
+        }
+        if (spawned.isEmpty()) return;
+
+        int size = spawned.size();
+        if (behaviorPulseCursor >= size) behaviorPulseCursor = 0;
+
+        long nowTick = getApproxServerTick();
+
+        for (int i = 0; i < max && i < size; i++) {
+            NPC npc = spawned.get(behaviorPulseCursor);
+            behaviorPulseCursor = (behaviorPulseCursor + 1) % size;
+            pulseNpc(npc, nowTick);
+        }
+
+        // close any previously opened doors/gates whose timers expired
+        closeExpiredOpenables(nowTick);
+    }
+
+    private void pulseNpc(NPC npc, long nowTick) {
+        if (npc == null || !npc.isSpawned()) return;
+        Entity ent = npc.getEntity();
+        if (!(ent instanceof LivingEntity)) return;
+
+        LivingEntity living = (LivingEntity) ent;
+        Location loc = living.getLocation();
+
+        // If this NPC is currently idling (lingering at a job POI), keep them planted.
+        try {
+            PersistentDataContainer pdc = living.getPersistentDataContainer();
+            Long idleUntil = pdc.get(KEY_VTF_IDLE_UNTIL, PersistentDataType.LONG);
+            if (idleUntil != null && idleUntil > nowTick) {
+                try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
+                return;
+            }
+
+            // If we previously set a target and they have arrived (navigation ended), start a linger window.
+            Byte expect = pdc.get(KEY_VTF_EXPECT_IDLE, PersistentDataType.BYTE);
+            if ((expect != null && expect == (byte) 1) && !npc.getNavigator().isNavigating()) {
+                String roleTmp = getRole(living);
+                int baseIdle = 80;
+                if ("priest".equals(roleTmp) || "scholar".equals(roleTmp)) baseIdle = 140;
+                else if ("guard".equals(roleTmp)) baseIdle = 100;
+                long linger = baseIdle + ThreadLocalRandom.current().nextInt(120);
+                pdc.set(KEY_VTF_IDLE_UNTIL, PersistentDataType.LONG, nowTick + linger);
+                pdc.set(KEY_VTF_EXPECT_IDLE, PersistentDataType.BYTE, (byte) 0);
+            }
+        } catch (Throwable ignored) {}
+
+        // Swimming assistance (light nudge)
+        tryAssistSwimming(living);
+
+        // Door/gate assist when navigating
+        if (npc.getNavigator().isNavigating()) {
+            tryOpenDoorOrGateAhead(living, nowTick);
+        }
+
+        // Lightweight role routine hints (POI bias) - only occasionally
+        if (ThreadLocalRandom.current().nextDouble() < 0.12) {
+            tryRoleRoutineStep(npc, living, loc);
+        }
+    }
+
+    private void closeExpiredOpenables(long nowTick) {
+        if (openedBlocksCloseAtTick.isEmpty()) return;
+
+        Iterator<Map.Entry<String, Long>> it = openedBlocksCloseAtTick.entrySet().iterator();
+        while (it.hasNext()) {
+            Map.Entry<String, Long> e = it.next();
+            if (e.getValue() == null || e.getValue() > nowTick) continue;
+
+            String key = e.getKey();
+            it.remove();
+            Block block = blockFromKey(key);
+            if (block == null) continue;
+            tryCloseOpenable(block);
+        }
+    }
+
+    private void tryAssistSwimming(LivingEntity living) {
+        try {
+            Material in = living.getLocation().getBlock().getType();
+            if (in != Material.WATER) return;
+
+            Vector vel = living.getVelocity();
+            // Small upward bias to keep head above water.
+            double vy = Math.max(vel.getY(), 0.08);
+            living.setVelocity(new Vector(vel.getX(), vy, vel.getZ()));
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private void tryOpenDoorOrGateAhead(LivingEntity living, long nowTick) {
+        Location l = living.getLocation();
+        World w = l.getWorld();
+        if (w == null) return;
+
+        Vector dir = l.getDirection();
+        if (dir.lengthSquared() < 0.0001) return;
+        dir = dir.normalize();
+
+        // Check a spot about 1 block ahead at foot level.
+        int cx = l.getBlockX() + (int) Math.round(dir.getX());
+        int cy = l.getBlockY();
+        int cz = l.getBlockZ() + (int) Math.round(dir.getZ());
+
+        Block b0 = w.getBlockAt(cx, cy, cz);
+        Block b1 = w.getBlockAt(cx, cy + 1, cz);
+
+        if (!tryOpenIfOpenable(b0, nowTick)) {
+            tryOpenIfOpenable(b1, nowTick);
+        }
+    }
+
+    private boolean tryOpenIfOpenable(Block block, long nowTick) {
+        if (block == null) return false;
+        try {
+            BlockData data = block.getBlockData();
+            if (!(data instanceof Openable)) return false;
+            Openable openable = (Openable) data;
+            if (openable.isOpen()) return false;
+
+            // Only open doors and gates (not trapdoors, etc.)
+            if (!(data instanceof Door) && !(data instanceof Gate)) return false;
+
+            openable.setOpen(true);
+            block.setBlockData(openable, true);
+
+            // Close again in ~3-5 seconds.
+            long closeAt = nowTick + 60L + ThreadLocalRandom.current().nextInt(40);
+            openedBlocksCloseAtTick.put(keyForBlock(block), closeAt);
+            return true;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void tryCloseOpenable(Block block) {
+        try {
+            BlockData data = block.getBlockData();
+            if (!(data instanceof Openable)) return;
+            if (!(data instanceof Door) && !(data instanceof Gate)) return;
+            Openable openable = (Openable) data;
+            if (!openable.isOpen()) return;
+            openable.setOpen(false);
+            block.setBlockData(openable, true);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String keyForBlock(Block block) {
+        if (block == null || block.getWorld() == null) return null;
+        return block.getWorld().getName() + ":" + block.getX() + ":" + block.getY() + ":" + block.getZ();
+    }
+
+    private Block blockFromKey(String key) {
+        if (key == null) return null;
+        String[] parts = key.split(":");
+        if (parts.length != 4) return null;
+        World w = Bukkit.getWorld(parts[0]);
+        if (w == null) return null;
+        int x = parseIntSafe(parts[1], Integer.MIN_VALUE);
+        int y = parseIntSafe(parts[2], Integer.MIN_VALUE);
+        int z = parseIntSafe(parts[3], Integer.MIN_VALUE);
+        if (x == Integer.MIN_VALUE || y == Integer.MIN_VALUE || z == Integer.MIN_VALUE) return null;
+        return w.getBlockAt(x, y, z);
+    }
+
+    private void tryRoleRoutineStep(NPC npc, LivingEntity living, Location loc) {
+        if (npc == null || living == null || loc == null) return;
+
+        // Don't override an in-progress navigation too aggressively.
+        if (npc.getNavigator().isNavigating() && ThreadLocalRandom.current().nextDouble() < 0.65) return;
+
+        String role = getRole(living);
+        String subrole = getSubrole(living);
+
+        Site site = getSite(living);
+        Location anchor = (site != null && loc.getWorld() != null && site.worldName.equalsIgnoreCase(loc.getWorld().getName())) ? site.center(loc.getWorld()) : loc;
+
+        Location target = null;
+
+        // Role-specific POI bias, but only in loaded chunks.
+        if ("priest".equals(role)) {
+            target = findPoiNearLoaded(anchor, 22, Arrays.asList(Material.LECTERN, Material.BELL, Material.BOOKSHELF, Material.CANDLE));
+        } else if ("scholar".equals(role)) {
+            target = findPoiNearLoaded(anchor, 22, Arrays.asList(Material.LECTERN, Material.BOOKSHELF, Material.CARTOGRAPHY_TABLE));
+        } else if ("dockhand".equals(role)) {
+            target = findDockPoiNearLoaded(anchor, 26);
+        } else if ("guard".equals(role)) {
+            target = findBuiltHotspotNearLoaded(anchor, 26);
+        } else if ("ranger".equals(role)) {
+            target = findEdgeHotspotNearLoaded(anchor, 34);
+        } else if ("worker".equals(role)) {
+            if ("farmer".equalsIgnoreCase(subrole)) {
+                target = findPoiNearLoaded(anchor, 24, Arrays.asList(Material.FARMLAND, Material.WHEAT, Material.CARROTS, Material.POTATOES, Material.BEETROOTS, Material.COMPOSTER));
+            } else {
+                target = findPoiNearLoaded(anchor, 24, Arrays.asList(Material.CRAFTING_TABLE, Material.ANVIL, Material.SMITHING_TABLE, Material.STONECUTTER, Material.GRINDSTONE, Material.FURNACE, Material.BLAST_FURNACE));
+            }
+        } else {
+            // Townsfolk/hermit baseline: go where builds are.
+            target = findBuiltHotspotNearLoaded(anchor, 24);
+        }
+
+        if (target == null) {
+            // fallback to safe ground around anchor
+            target = findSafeGroundNearLoaded(anchor, roamRadiusForRole(role));
+        }
+
+
+if (target != null) {
+    try {
+        PersistentDataContainer pdc = living.getPersistentDataContainer();
+        pdc.set(KEY_VTF_EXPECT_IDLE, PersistentDataType.BYTE, (byte) 1);
+    } catch (Throwable ignored) {}
+    npc.getNavigator().setTarget(target);
+}
+    }
+
+    private Location findPoiNearLoaded(Location base, int radius, List<Material> targets) {
+        if (base == null || base.getWorld() == null) return null;
+        World w = base.getWorld();
+        int bx = base.getBlockX();
+        int by = base.getBlockY();
+        int bz = base.getBlockZ();
+
+        // Sample random spots; only examine loaded chunks.
+        for (int tries = 0; tries < 160; tries++) {
+            int x = bx + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            int z = bz + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+
+            Chunk c = w.getChunkAt(x >> 4, z >> 4);
+            if (!c.isLoaded()) continue;
+
+            int topY = w.getHighestBlockYAt(x, z);
+            Block ground = w.getBlockAt(x, topY, z);
+
+            // If the ground itself is a POI, stand near it.
+            if (targets.contains(ground.getType())) {
+                Location stand = new Location(w, x + 0.5, topY + 1, z + 0.5);
+                if (isStandable(stand)) return stand;
+            }
+
+            // Also check a small neighborhood around the topY.
+            for (int dy = -1; dy <= 2; dy++) {
+                Block b = w.getBlockAt(x, topY + dy, z);
+                if (targets.contains(b.getType())) {
+                    Location stand = b.getLocation().add(0.5, 1.0, 0.5);
+                    if (isStandable(stand)) return stand;
+                }
+            }
+        }
+        return null;
+    }
+
+    private Location findDockPoiNearLoaded(Location base, int radius) {
+        if (base == null || base.getWorld() == null) return null;
+        World w = base.getWorld();
+        int bx = base.getBlockX();
+        int bz = base.getBlockZ();
+
+        for (int tries = 0; tries < 180; tries++) {
+            int x = bx + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            int z = bz + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            Chunk c = w.getChunkAt(x >> 4, z >> 4);
+            if (!c.isLoaded()) continue;
+
+            int topY = w.getHighestBlockYAt(x, z);
+            Block ground = w.getBlockAt(x, topY, z);
+
+            // Prefer wood slabs/planks near water.
+            Material g = ground.getType();
+            if (!(g.name().endsWith("_PLANKS") || g.name().endsWith("_SLAB") || g.name().endsWith("_STAIRS"))) continue;
+
+            boolean nearWater = false;
+            for (int ox = -2; ox <= 2 && !nearWater; ox++) {
+                for (int oz = -2; oz <= 2 && !nearWater; oz++) {
+                    Material m = w.getBlockAt(x + ox, topY, z + oz).getType();
+                    if (m == Material.WATER) nearWater = true;
+                }
+            }
+            if (!nearWater) continue;
+
+            Location stand = new Location(w, x + 0.5, topY + 1, z + 0.5);
+            if (isStandable(stand)) return stand;
+        }
+        return null;
+    }
+
+    private Location findBuiltHotspotNearLoaded(Location base, int radius) {
+        if (base == null || base.getWorld() == null) return null;
+        World w = base.getWorld();
+        int bx = base.getBlockX();
+        int bz = base.getBlockZ();
+
+        Location best = null;
+        int bestScore = 0;
+
+        for (int tries = 0; tries < 40; tries++) {
+            int x = bx + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            int z = bz + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            Chunk c = w.getChunkAt(x >> 4, z >> 4);
+            if (!c.isLoaded()) continue;
+            int topY = w.getHighestBlockYAt(x, z);
+            Location stand = new Location(w, x + 0.5, topY + 1, z + 0.5);
+            if (!isStandable(stand)) continue;
+
+            int score = builtDensityScore(w, x, topY, z);
+            if (score > bestScore) {
+                bestScore = score;
+                best = stand;
+            }
+        }
+
+        return (bestScore >= 6) ? best : null;
+    }
+
+    private Location findEdgeHotspotNearLoaded(Location base, int radius) {
+        // Ranger: prefer a moderate built score (edge), not the densest core.
+        if (base == null || base.getWorld() == null) return null;
+        World w = base.getWorld();
+        int bx = base.getBlockX();
+        int bz = base.getBlockZ();
+
+        Location best = null;
+        int bestDistBias = -999999;
+
+        for (int tries = 0; tries < 50; tries++) {
+            int x = bx + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            int z = bz + ThreadLocalRandom.current().nextInt(-radius, radius + 1);
+            Chunk c = w.getChunkAt(x >> 4, z >> 4);
+            if (!c.isLoaded()) continue;
+            int topY = w.getHighestBlockYAt(x, z);
+            Location stand = new Location(w, x + 0.5, topY + 1, z + 0.5);
+            if (!isStandable(stand)) continue;
+
+            int score = builtDensityScore(w, x, topY, z);
+            if (score < 3 || score > 10) continue;
+
+            int dist = (int) Math.round(Math.sqrt((x - bx) * (double) (x - bx) + (z - bz) * (double) (z - bz)));
+            int bias = dist * 2 + score; // prefer further out, but still somewhat built
+
+            if (bias > bestDistBias) {
+                bestDistBias = bias;
+                best = stand;
+            }
+        }
+
+        return best;
+    }
+
+    private int builtDensityScore(World w, int x, int y, int z) {
+        int score = 0;
+        for (int ox = -2; ox <= 2; ox++) {
+            for (int oz = -2; oz <= 2; oz++) {
+                Material m = w.getBlockAt(x + ox, y, z + oz).getType();
+                String n = m.name();
+
+                if (n.endsWith("_PLANKS") || n.endsWith("_LOG") || n.contains("STRIPPED_")) score += 2;
+                else if (n.contains("BRICKS") || n.contains("STONE_BRICKS") || n.equals("COBBLESTONE")) score += 2;
+                else if (m == Material.GLASS || n.endsWith("_GLASS")) score += 2;
+                else if (m == Material.LANTERN || m == Material.TORCH || n.endsWith("_TORCH")) score += 2;
+                else if (m == Material.CHEST || m == Material.BARREL) score += 2;
+                else if (m == Material.DIRT_PATH || m == Material.GRAVEL || m == Material.COBBLESTONE) score += 1;
+                else if (n.contains("FENCE") || n.contains("DOOR") || n.contains("GATE")) score += 1;
+            }
+        }
+        return score;
+    }
+
+    private boolean isStandable(Location stand) {
+        if (stand == null || stand.getWorld() == null) return false;
+        World w = stand.getWorld();
+        int x = stand.getBlockX();
+        int y = stand.getBlockY();
+        int z = stand.getBlockZ();
+        Material a0 = w.getBlockAt(x, y, z).getType();
+        Material a1 = w.getBlockAt(x, y + 1, z).getType();
+        Material ground = w.getBlockAt(x, y - 1, z).getType();
+        if (!a0.isAir() || !a1.isAir()) return false;
+        if (ground == Material.WATER || ground == Material.LAVA) return false;
+        return true;
+    }
+
     private int queuePopulationCycle(String reason) {
         if (sites.isEmpty()) return 0;
 
@@ -793,20 +1691,41 @@ startSkinTasks();
         if (spawnLoc == null) return;
 
         String role = pickRole();
-        String name = roleDisplay(role) + " " + (100 + ThreadLocalRandom.current().nextInt(900));
+        String subrole = pickSubroleForRole(role);
+
+        // Create NPC first so we can use its stable ID for deterministic skin gender choice.
+        NPC npc = null;
+        try {
+            npc = CitizensAPI.getNPCRegistry().createNPC(EntityType.PLAYER, "Townsfolk");
+        } catch (Throwable ignored) { }
+
+        if (npc == null) return;
+
+        // Choose role-based skin key (deterministic 50/50 female if available) and then generate a matching name.
+        String roleBase = roleBaseFromRole(role, subrole);
+        String skinKey = pickRoleBasedSkinKeyByBaseAndId(roleBase, npc.getId());
+        boolean preferFemale = isFemaleSkinKey(skinKey);
+
+        String personal = generatePersonalName(role, subrole, preferFemale);
+        String displayName = formatDisplayName(role, subrole, personal);
 
         try {
-            NPC npc = CitizensAPI.getNPCRegistry().createNPC(EntityType.PLAYER, name);
+            npc.setName(displayName);
             applyNpcCollisionPolicy(npc);
             npc.spawn(spawnLoc);
 
             tagManaged(npc);
+            setStoredSkinKey(npc, skinKey);
             ensureTownSkinApplied(npc, "spawn");
 
             Entity ent = npc.getEntity();
             if (ent != null) {
                 PersistentDataContainer pdc = ent.getPersistentDataContainer();
                 pdc.set(KEY_VTF_ROLE, PersistentDataType.STRING, role);
+                if (subrole != null && !subrole.isBlank()) {
+                    pdc.set(KEY_VTF_SUBROLE, PersistentDataType.STRING, subrole);
+                }
+                pdc.set(KEY_VTF_NAME, PersistentDataType.STRING, personal);
                 pdc.set(KEY_VTF_SITE, PersistentDataType.STRING, site.name);
             }
 
@@ -1097,6 +2016,266 @@ startSkinTasks();
             case "hermit": return "Hermit";
             default: return "Townsfolk";
         }
+    }
+
+    private String getSubrole(Entity ent) {
+        if (ent == null) return "";
+        try {
+            PersistentDataContainer pdc = ent.getPersistentDataContainer();
+            String s = pdc.get(KEY_VTF_SUBROLE, PersistentDataType.STRING);
+            return (s == null) ? "" : s;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    private String pickSubroleForRole(String role) {
+        if (role == null) return "";
+        switch (role) {
+            case "worker": {
+                // split into a few believable trades; keep "farmer" fairly common.
+                double r = ThreadLocalRandom.current().nextDouble();
+                if (r < 0.40) return "farmer";
+                if (r < 0.60) return "smith";
+                if (r < 0.78) return "mason";
+                if (r < 0.90) return "carpenter";
+                return "laborer";
+            }
+            case "guard": {
+                double r = ThreadLocalRandom.current().nextDouble();
+                if (r < 0.65) return "watch";
+                if (r < 0.90) return "patrol";
+                return "archer";
+            }
+            default:
+                return "";
+        }
+    }
+
+    private String formatDisplayName(String role, String subrole, String personalName) {
+        String title = roleDisplay(role);
+        if ("worker".equals(role)) {
+            if ("farmer".equalsIgnoreCase(subrole)) title = "Farmer";
+            else if ("smith".equalsIgnoreCase(subrole)) title = "Smith";
+            else if ("mason".equalsIgnoreCase(subrole)) title = "Mason";
+            else if ("carpenter".equalsIgnoreCase(subrole)) title = "Carpenter";
+            else if ("scribe".equalsIgnoreCase(subrole)) title = "Scribe";
+        } else if ("guard".equals(role)) {
+            if ("archer".equalsIgnoreCase(subrole)) title = "Archer";
+            else if ("watch".equalsIgnoreCase(subrole)) title = "Watchman";
+        }
+
+        if (personalName == null || personalName.isBlank()) {
+            personalName = generatePersonalName(role, subrole);
+        }
+
+        return title + " " + personalName;
+    }
+
+    private String generatePersonalName(String role, String subrole) {
+        return generatePersonalName(role, subrole, false);
+    }
+
+    private String generatePersonalName(String role, String subrole, boolean preferFemale) {
+                // Medieval-ish / colonial-ish name pool.
+        // Rule: if the NPC is using a *_f skin, prefer the female pool.
+        // (Neutral names may appear for either.)
+        String[] firstMale = new String[] {
+                "Alden", "Alaric", "Bennett", "Corwin", "Edwin", "Elias", "Emmett", "Fergus", "Gideon", "Hugh",
+                "Jasper", "Jonas", "Marek", "Miles", "Nolan", "Owen", "Rowan", "Silas", "Theron", "Wyatt"
+        };
+        String[] firstFemale = new String[] {
+                "Beatrice", "Cecily", "Elowen", "Isolde", "Leona", "Lysa", "Matilda", "Mira", "Tamsin", "Willa",
+                "Adelaide", "Briony", "Cordelia", "Edith", "Evelyn", "Rosamund"
+        };
+        String[] firstNeutral = new String[] {
+                "Ash", "Quinn", "Robin", "Morgan", "Avery"
+        };
+
+        String[] last = new String[] {
+                "Ashford","Barrow","Blackwood","Briggs","Cavendish","Crowley","Davenport","Dunwick","Fairchild",
+                "Fletcher","Graves","Harrow","Hawthorne","Kell","Lancaster","Marrow","Pembroke","Reeve","Stanton",
+                "Thorne","Wainwright","Wells","Westbrook","Whitlock"
+        };
+
+        String f;
+        double neutralChance = 0.12;
+        double r = ThreadLocalRandom.current().nextDouble();
+        if (r < neutralChance) {
+            f = firstNeutral[ThreadLocalRandom.current().nextInt(firstNeutral.length)];
+        } else if (preferFemale) {
+            f = firstFemale[ThreadLocalRandom.current().nextInt(firstFemale.length)];
+        } else {
+            f = firstMale[ThreadLocalRandom.current().nextInt(firstMale.length)];
+        }
+
+        String l = last[ThreadLocalRandom.current().nextInt(last.length)];
+        return f + " " + l;
+    }
+
+
+
+    private boolean shouldRegenerateForGender(String personalName, boolean preferFemale) {
+        if (personalName == null) return true;
+        String trimmed = personalName.trim();
+        if (trimmed.isEmpty()) return true;
+        String firstToken = trimmed.split("\\s+")[0].trim();
+        if (firstToken.isEmpty()) return true;
+
+        // If the skin is female, avoid obviously-male first names, and vice versa.
+        Set<String> male = new HashSet<>(Arrays.asList(
+                "Alden","Alaric","Bennett","Corwin","Edwin","Elias","Emmett","Fergus","Gideon","Hugh",
+                "Jasper","Jonas","Marek","Miles","Nolan","Owen","Rowan","Silas","Theron","Wyatt"
+        ));
+        Set<String> female = new HashSet<>(Arrays.asList(
+                "Beatrice","Cecily","Elowen","Isolde","Leona","Lysa","Matilda","Mira","Tamsin","Willa",
+                "Adelaide","Briony","Cordelia","Edith","Evelyn","Rosamund"
+        ));
+
+        if (preferFemale && male.contains(firstToken)) return true;
+        if (!preferFemale && female.contains(firstToken)) return true;
+        return false;
+    }
+
+    private boolean isNpcFemaleBySkin(NPC npc) {
+        if (npc == null) return false;
+        String key = getStoredSkinKey(npc);
+        if (key == null) key = pickRoleBasedSkinKey(npc);
+        return isFemaleSkinKey(key);
+    }
+
+    private int migrateSpawnedManagedNpcs() {
+        int updated = 0;
+        for (NPC npc : CitizensAPI.getNPCRegistry()) {
+            if (!npc.isSpawned()) continue;
+            if (!isManagedNpc(npc) || isExcludedNpc(npc)) continue;
+            Entity ent = npc.getEntity();
+            if (ent == null) continue;
+
+            ensureRoleAndSite(ent, npc.getName());
+            if (ensureIdentityAndName(npc, ent, true)) {
+                updated++;
+            }
+        }
+        return updated;
+    }
+
+    private boolean ensureIdentityAndName(NPC npc, Entity ent, boolean forceRefresh) {
+        if (npc == null || ent == null) return false;
+
+        PersistentDataContainer pdc = ent.getPersistentDataContainer();
+
+        String role = pdc.get(KEY_VTF_ROLE, PersistentDataType.STRING);
+        if (role == null || role.isBlank()) role = inferRoleFromName(npc.getName());
+        if (role == null || role.isBlank()) role = "townsfolk";
+
+        String subrole = pdc.get(KEY_VTF_SUBROLE, PersistentDataType.STRING);
+        if (subrole == null) subrole = "";
+
+        // Back-compat: infer subrole from legacy names
+        String strippedName = safeStrip(npc.getName());
+        if (strippedName != null) {
+            if (strippedName.startsWith("Farmer")) { role = "worker"; subrole = "farmer"; }
+            if (strippedName.startsWith("Smith")) { role = "worker"; subrole = "smith"; }
+            if (strippedName.startsWith("Mason")) { role = "worker"; subrole = "mason"; }
+            if (strippedName.startsWith("Scribe")) { role = "scholar"; subrole = "scribe"; }
+            if (strippedName.startsWith("Watchman")) { role = "guard"; subrole = "watch"; }
+            if (strippedName.startsWith("Sentinel")) { role = "guard"; subrole = "patrol"; }
+        }
+
+        if (subrole.isBlank()) {
+            subrole = pickSubroleForRole(role);
+        }
+
+        String personal = pdc.get(KEY_VTF_NAME, PersistentDataType.STRING);
+
+        boolean preferFemale = isNpcFemaleBySkin(npc);
+
+        boolean changed = false;
+        boolean genderMismatch = (personal != null && !personal.isBlank() && shouldRegenerateForGender(personal, preferFemale));
+        if (personal == null || personal.isBlank() || (forceRefresh && genderMismatch)) {
+            personal = generatePersonalName(role, subrole, preferFemale);
+            pdc.set(KEY_VTF_NAME, PersistentDataType.STRING, personal);
+            changed = true;
+        }
+
+// Write back role/subrole if missing or inferred.
+        if (pdc.get(KEY_VTF_ROLE, PersistentDataType.STRING) == null || forceRefresh) {
+            pdc.set(KEY_VTF_ROLE, PersistentDataType.STRING, role);
+            changed = true;
+        }
+        if (!subrole.isBlank() && (pdc.get(KEY_VTF_SUBROLE, PersistentDataType.STRING) == null || forceRefresh)) {
+            pdc.set(KEY_VTF_SUBROLE, PersistentDataType.STRING, subrole);
+            changed = true;
+        }
+
+        // Rename display if it looks like the old numeric style or doesn't match our title+name format.
+        String expected = formatDisplayName(role, subrole, personal);
+        String current = safeStrip(npc.getName());
+        if (forceRefresh || shouldRenameForBackCompat(current)) {
+            try {
+                if (current == null || !current.equals(expected)) {
+                    npc.setName(expected);
+                    changed = true;
+                }
+            } catch (Throwable ignored) {}
+        }
+
+        // Equip a light role-appropriate loadout (only if entity is a Player).
+        tryEquipForRole(npc, ent, role, subrole);
+
+        return changed;
+    }
+
+    private boolean shouldRenameForBackCompat(String currentName) {
+        if (currentName == null || currentName.isBlank()) return true;
+        for (String prefix : legacyRolePrefixes) {
+            if (currentName.equals(prefix)) return true;
+            if (currentName.startsWith(prefix + " ")) {
+                String rest = currentName.substring((prefix + " ").length()).trim();
+                // old style usually was a number.
+                if (rest.matches("\\d{2,4}")) return true;
+            }
+        }
+        return false;
+    }
+
+    private void tryEquipForRole(NPC npc, Entity ent, String role, String subrole) {
+        if (!(ent instanceof Player)) return;
+        Player p = (Player) ent;
+
+        // Avoid constantly overwriting player-set items; only fill empty slots.
+        try {
+            if ("guard".equals(role)) {
+                if (p.getInventory().getItemInMainHand() == null || p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                    Material weapon = "archer".equalsIgnoreCase(subrole) ? Material.BOW : Material.IRON_SWORD;
+                    p.getInventory().setItemInMainHand(new org.bukkit.inventory.ItemStack(weapon));
+                }
+                if (p.getInventory().getItemInOffHand() == null || p.getInventory().getItemInOffHand().getType() == Material.AIR) {
+                    p.getInventory().setItemInOffHand(new org.bukkit.inventory.ItemStack(Material.SHIELD));
+                }
+            } else if ("priest".equals(role)) {
+                if (p.getInventory().getItemInMainHand() == null || p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                    p.getInventory().setItemInMainHand(new org.bukkit.inventory.ItemStack(Material.BOOK));
+                }
+            } else if ("scholar".equals(role)) {
+                if (p.getInventory().getItemInMainHand() == null || p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                    p.getInventory().setItemInMainHand(new org.bukkit.inventory.ItemStack(Material.WRITABLE_BOOK));
+                }
+            } else if ("dockhand".equals(role)) {
+                if (p.getInventory().getItemInMainHand() == null || p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                    p.getInventory().setItemInMainHand(new org.bukkit.inventory.ItemStack(Material.OAK_BOAT));
+                }
+            } else if ("worker".equals(role)) {
+                if (p.getInventory().getItemInMainHand() == null || p.getInventory().getItemInMainHand().getType() == Material.AIR) {
+                    Material tool = Material.IRON_PICKAXE;
+                    if ("farmer".equalsIgnoreCase(subrole)) tool = Material.IRON_HOE;
+                    else if ("smith".equalsIgnoreCase(subrole)) tool = Material.IRON_AXE;
+                    else if ("mason".equalsIgnoreCase(subrole)) tool = Material.IRON_PICKAXE;
+                    p.getInventory().setItemInMainHand(new org.bukkit.inventory.ItemStack(tool));
+                }
+            }
+        } catch (Throwable ignored) {}
     }
 
     private void applyNameplatePolicy(Entity ent) {
@@ -1459,6 +2638,13 @@ startSkinTasks();
                 "  ranger: 22\n" +
                 "  hermit: 20\n" +
                 "\n" +
+                "behavior:\n" +
+                "  pulsePerTick: 16\n" +
+                "\n" +
+                "dialogue:\n" +
+                "  enableInteractive: true\n" +
+                "  sessionSeconds: 45\n" +
+                "\n" +
                 "sites:\n" +
                 "  ignoreContains:\n" +
                 "    - sharko\n" +
@@ -1512,6 +2698,10 @@ startSkinTasks();
 
             populationSiteActivationRadius = getConfig().getInt("population.siteActivationRadius", populationSiteActivationRadius);
             populationSpawnPerTick = getConfig().getInt("population.spawnPerTick", populationSpawnPerTick);
+
+            behaviorPulsePerTick = getConfig().getInt("behavior.pulsePerTick", behaviorPulsePerTick);
+            interactiveDialogueEnabled = getConfig().getBoolean("dialogue.enableInteractive", interactiveDialogueEnabled);
+            dialogueSessionSeconds = getConfig().getInt("dialogue.sessionSeconds", dialogueSessionSeconds);
 
             returnToSiteDistance = getConfig().getInt("roaming.returnToSiteDistance", returnToSiteDistance);
             roamRadiusTownsfolk = getConfig().getInt("roaming.townsfolk", roamRadiusTownsfolk);
@@ -1671,6 +2861,52 @@ private String pickRandomTownsfolkSkinKey() {
     // Fallback: pick any known townsfolk skin at random.
     String file = TOWNSFOLK_SKIN_FILES.get(ThreadLocalRandom.current().nextInt(TOWNSFOLK_SKIN_FILES.size()));
     return skinKeyFromFile(file);
+}
+
+
+private String roleBaseFromRole(String role, String subrole) {
+    if (role == null) return null;
+    String r = role.toLowerCase(Locale.ROOT);
+
+    if (r.equals("priest")) return "priest";
+    if (r.equals("scholar")) {
+        if ("scribe".equalsIgnoreCase(subrole)) return "scribe";
+        return "scholar";
+    }
+    if (r.equals("dockhand")) return "dockhand";
+    if (r.equals("ranger")) return "ranger";
+    if (r.equals("hermit")) return "hermit";
+    if (r.equals("merchant")) return "merchant";
+    if (r.equals("townsfolk")) return "townsfolk";
+
+    if (r.equals("worker")) {
+        if ("farmer".equalsIgnoreCase(subrole)) return "farmer";
+        if ("mason".equalsIgnoreCase(subrole)) return "mason";
+        if ("smith".equalsIgnoreCase(subrole)) return "smith";
+        return "worker";
+    }
+
+    if (r.equals("guard")) {
+        if ("watch".equalsIgnoreCase(subrole)) return "watchman";
+        if ("patrol".equalsIgnoreCase(subrole)) return "sentinel";
+        return "guard";
+    }
+
+    return null;
+}
+
+private String pickRoleBasedSkinKeyByBaseAndId(String roleBase, int npcId) {
+    if (roleBase == null || roleBase.isBlank()) return pickRandomTownsfolkSkinKey();
+    String base = roleBase.trim().toLowerCase(Locale.ROOT);
+
+    boolean hasFemale = TOWNSFOLK_SKIN_FILES.contains(base + "_f.png");
+    if (hasFemale) {
+        int coin = Math.floorMod(Integer.valueOf(npcId).hashCode(), 2);
+        if (coin == 0) {
+            return skinKeyFromFile(base + "_f.png");
+        }
+    }
+    return skinKeyFromFile(base + ".png");
 }
 
 private String pickRoleBasedSkinKey(NPC npc) {

@@ -1,5 +1,5 @@
 name: CatProtection
-version: 1.0
+version: 1.1
 main: com.example.catprotection.CatProtection
 api-version: 1.21
-description: A plugin to make all cats impervious to damage.
+description: A plugin to make all cats and ocelots impervious to damage.

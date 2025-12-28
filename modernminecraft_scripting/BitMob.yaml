@@ -1,0 +1,17 @@
+# File: BitMob.yaml  (plugin.yml)
+name: BitMob
+main: BitMob
+version: 1.3.0
+api-version: "1.21"
+author: ChatGPT
+commands:
+  bit:
+    description: Spawn/list/dismiss Bit entities, plus per-user pet Bit commands.
+    usage: /bit spawn | /bit list | /bit dismiss <id|uuid> | /bit spawnpet | /bit dismisspet | /bit togglepetspeech
+permissions:
+  bitmob.admin:
+    description: Allows admin use of spawn/list/dismiss for wild Bits.
+    default: op
+  bitmob.pet:
+    description: Allows players to use pet Bit commands.
+    default: true

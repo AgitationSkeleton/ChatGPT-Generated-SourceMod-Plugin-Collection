@@ -1,0 +1,6 @@
+name: SnowfallRules
+main: SnowfallRules
+version: 1.0.0
+api-version: "1.21"
+author: ChatGPT
+description: Restricts natural snowfall snow layers to only form on allowed surface blocks (e.g., grass/leaves).

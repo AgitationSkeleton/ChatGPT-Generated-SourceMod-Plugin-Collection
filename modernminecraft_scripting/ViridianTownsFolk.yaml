@@ -8,10 +8,10 @@ softdepend: [Citizens]
 commands:
   vtf:
     description: ViridianTownsFolk control commands
-    usage: /vtf <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig|migrate>
+    usage: /vtf <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig>
   viridiantownsfolk:
     description: Alias for /vtf
-    usage: /viridiantownsfolk <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig|migrate>
+    usage: /viridiantownsfolk <rehook|adoptall|topup|purge|stats|reloadsites|reloadconfig>
 permissions:
   vtf.admin:
     description: Allows ViridianTownsFolk admin commands
