@@ -1,0 +1,10 @@
+name: SecInMinecraft
+main: SecInMinecraft
+version: 2.0.0
+api-version: 1.21
+depend: [ProtocolLib, LibsDisguises, packetevents]
+author: ChatGPT
+commands:
+  secinminecraft:
+    description: Spawn/dismiss the SecInMinecraft boat + disguised funnyshid1 + enderman trio (one per world).
+    usage: /secinminecraft [dismiss]
