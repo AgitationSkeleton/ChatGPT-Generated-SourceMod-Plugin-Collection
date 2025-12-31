@@ -218,6 +218,11 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             }
             Player player = (Player) sender;
 
+            if (!isWorldAllowed(player.getWorld())) {
+                player.sendMessage("IndevMobs is not enabled in this world.");
+                return true;
+            }
+
             String mobTypeArg = "random";
             if (args.length >= 2) mobTypeArg = args[1].toLowerCase(Locale.ROOT);
 
@@ -278,6 +283,9 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         FileConfiguration cfg = getConfig();
 
         cfg.addDefault("enabled", true);
+
+        // World allowlist (plugin runs only in these worlds when list is non-empty)
+        cfg.addDefault("worlds.allowed", java.util.Arrays.asList("world", "tedkraft_world"));
 
         cfg.addDefault("spawning.enabledWorlds", new ArrayList<String>());
         cfg.addDefault("spawning.overworldOnly", true);
@@ -414,6 +422,10 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             if (!getConfig().getBoolean("enabled", true)) return;
 
             for (World world : Bukkit.getWorlds()) {
+                if (!isWorldAllowed(world)) {
+                    continue;
+                }
+
                 // Overworld-only natural occurrence (unless explicitly turned off)
                 if (getConfig().getBoolean("spawning.overworldOnly", true) && world.getEnvironment() != World.Environment.NORMAL) {
                     continue;
@@ -477,7 +489,9 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             UUID uuid = entry.getKey();
             Entity entity = Bukkit.getEntity(uuid);
             if (entity == null || !entity.isValid() || entity.isDead()) {
-                cleanupTrackedIndevMob(uuid, true);
+                iterator.remove();
+                citizensNpcIdByEntity.remove(uuid);
+                removeDynmapMarker(uuid);
                 continue;
             }
             if (entity.getWorld().equals(world)) count++;
@@ -660,6 +674,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     @EventHandler(ignoreCancelled = true)
     public void onChunkLoad(ChunkLoadEvent event) {
         if (!citizensAvailable) return;
+        if (event == null || event.getChunk() == null || !isWorldAllowed(event.getChunk().getWorld())) return;
         // Delay 1 tick to let Citizens finish attaching NPCs to entities in this chunk
         Bukkit.getScheduler().runTaskLater(this, () -> adoptNpcsInChunk(event.getChunk()), 1L);
     }
@@ -687,6 +702,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
                 if (!npc.isSpawned()) continue;
                 Entity entity = npc.getEntity();
                 if (entity == null) continue;
+                if (!isWorldAllowed(entity.getWorld())) continue;
                 String mobType = resolveMobTypeForNpc(npc);
                 if (mobType == null) continue;
                 adoptNpc(npc, entity, mobType);
@@ -696,6 +712,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
     private void adoptNpcsInChunk(Chunk chunk) {
         if (!citizensAvailable) return;
+        if (chunk == null || !isWorldAllowed(chunk.getWorld())) return;
 
         // Fast path: scan entities in the chunk, then ask Citizens which NPC owns them
         try {
@@ -821,10 +838,8 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             for (Map.Entry<UUID, String> entry : spawnedEntities.entrySet()) {
                 UUID uuid = entry.getKey();
                 Entity entity = Bukkit.getEntity(uuid);
-                if (entity == null || !entity.isValid() || entity.isDead()) {
-                    cleanupTrackedIndevMob(uuid, true);
-                    continue;
-                }
+                if (entity == null || !entity.isValid() || entity.isDead()) continue;
+                if (!isWorldAllowed(entity.getWorld())) continue;
 
                 NPC npc = getNpcByEntityUuid(uuid);
                 if (npc != null) {
@@ -882,9 +897,15 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
                 Entity entity = Bukkit.getEntity(uuid);
                 if (entity == null || !entity.isValid() || entity.isDead()) {
-                cleanupTrackedIndevMob(uuid, true);
-                continue;
-            }
+                    iterator.remove();
+                    citizensNpcIdByEntity.remove(uuid);
+                    removeDynmapMarker(uuid);
+                    continue;
+                }
+
+                if (!isWorldAllowed(entity.getWorld())) {
+                    continue;
+                }
 
                 NPC npc = getNpcByEntityUuid(uuid);
                 if (npc == null || !npc.isSpawned()) continue;
@@ -955,6 +976,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     public void onIndevNpcPlayerDeath(PlayerDeathEvent event) {
         String mobType = getTaggedMobType(event.getEntity());
         if (mobType == null) return;
+        if (!isWorldAllowed(event.getEntity().getWorld())) return;
 
         // Suppress obituary
         event.setDeathMessage(null);
@@ -984,18 +1006,20 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     public void onEntityDeath(EntityDeathEvent event) {
         String mobType = getTaggedMobType(event.getEntity());
         if (mobType == null) return;
+        if (!isWorldAllowed(event.getEntity().getWorld())) return;
 
         event.getDrops().clear();
         event.getDrops().addAll(buildDropsFor(mobType));
 
-        // Clean up tracking + dynmap marker + Citizens NPC
-        cleanupTrackedIndevMob(event.getEntity().getUniqueId(), true);
+        // Remove dynmap marker immediately
+        removeDynmapMarker(event.getEntity().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
     public void onIndevMobHurtSound(EntityDamageEvent event) {
         String mobType = getTaggedMobType(event.getEntity());
         if (mobType == null) return;
+        if (!isWorldAllowed(event.getEntity().getWorld())) return;
         if (!(event.getEntity() instanceof org.bukkit.entity.LivingEntity living)) return;
 
         float volume = (float) getConfig().getDouble("sounds.hurt.volume", 1.0);
@@ -1068,48 +1092,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             return entity.getPersistentDataContainer().get(indevMobTypeKey, PersistentDataType.STRING);
         } catch (Throwable ignored) {}
         return null;
-    }
-
-    // -------------------------------------------------------------------------
-    // Tracking cleanup
-    // -------------------------------------------------------------------------
-
-    /**
-     * Remove an IndevMob from internal tracking and (if present) destroy the Citizens NPC.
-     * This prevents the Citizens NPC registry from accumulating dead/invalid IndevMobs.
-     */
-    private void cleanupTrackedIndevMob(UUID entityUuid, boolean removeMarker) {
-        if (entityUuid == null) return;
-
-        // Remove from our internal maps first
-        spawnedEntities.remove(entityUuid);
-
-        Integer npcId = citizensNpcIdByEntity.remove(entityUuid);
-
-        if (removeMarker) {
-            removeDynmapMarker(entityUuid);
-        }
-
-        if (!citizensAvailable) return;
-
-        try {
-            NPC npc = null;
-            if (npcId != null) {
-                npc = CitizensAPI.getNPCRegistry().getById(npcId);
-            } else {
-                npc = getNpcByEntityUuid(entityUuid);
-            }
-            if (npc != null) {
-                try {
-                    if (npc.isSpawned()) {
-                        npc.despawn();
-                    }
-                } catch (Throwable ignored) {}
-                try {
-                    npc.destroy();
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
     }
 
     // -------------------------------------------------------------------------
@@ -1395,6 +1377,11 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             return;
         }
 
+        if (!isWorldAllowed(entity.getWorld())) {
+            removeDynmapMarker(entityUuid);
+            return;
+        }
+
         String mobType = spawnedEntities.get(entityUuid);
         if (mobType == null) return;
 
@@ -1445,6 +1432,17 @@ public final class IndevMobs extends JavaPlugin implements Listener {
     // -------------------------------------------------------------------------
     // Utility helpers
     // -------------------------------------------------------------------------
+
+private boolean isWorldAllowed(World world) {
+    if (world == null) return false;
+    List<String> allowed = getConfig().getStringList("worlds.allowed");
+    if (allowed == null || allowed.isEmpty()) return true;
+    for (String w : allowed) {
+        if (w != null && w.equalsIgnoreCase(world.getName())) return true;
+    }
+    return false;
+}
+
 
     private int randomInt(int min, int max) {
         if (max < min) max = min;
@@ -1498,6 +1496,7 @@ public void onIndevNpcDeathByName(PlayerDeathEvent event) {
 
     String name = dead.getName();
     if (!isIndevNpcName(name)) return;
+    if (!isWorldAllowed(dead.getWorld())) return;
 
     // Suppress obituary/death message
     try { event.setDeathMessage(null); } catch (Throwable ignored) {}
@@ -1523,6 +1522,7 @@ public void onIndevNpcDeathByNameMonitor(PlayerDeathEvent event) {
     if (dead == null) return;
 
     if (!isIndevNpcName(dead.getName())) return;
+    if (!isWorldAllowed(dead.getWorld())) return;
     try { event.setDeathMessage(null); } catch (Throwable ignored) {}
 }
 

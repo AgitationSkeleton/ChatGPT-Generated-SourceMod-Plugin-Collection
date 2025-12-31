@@ -1,0 +1,12 @@
+name: SkylandsPortals
+main: SkylandsPortals
+version: 3.0
+api-version: "1.21"
+author: ChatGPT
+description: >
+  Glowstone nether-style portals that send players to skylands and back, bypassing vanilla portal teleports.
+
+commands:
+  skylandsportalsreload:
+    description: Reload SkylandsPortals configuration.
+    usage: /<command>

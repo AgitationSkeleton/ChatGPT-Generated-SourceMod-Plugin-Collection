@@ -1,0 +1,14 @@
+name: GridPrograms
+main: GridPrograms
+version: 1.0.0
+api-version: "1.21"
+author: ChatGPT
+depend: [Citizens]
+commands:
+  grid:
+    description: GridPrograms admin command
+    usage: /grid reload | status | purge | skins status | skins reupload
+    permission: gridprograms.admin
+permissions:
+  gridprograms.admin:
+    default: op

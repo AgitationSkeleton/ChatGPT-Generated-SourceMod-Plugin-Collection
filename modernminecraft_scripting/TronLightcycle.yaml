@@ -1,0 +1,10 @@
+name: TronLightcycle
+main: TronLightcycle
+version: 1.0.0
+api-version: "1.21"
+author: ChatGPT
+
+commands:
+  lightcycle:
+    description: Tron Lightcycle commands
+    usage: /lightcycle <color|give|reload>

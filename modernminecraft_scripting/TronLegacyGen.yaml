@@ -1,0 +1,14 @@
+name: TronLegacyGen
+main: TronLegacyGen
+version: 1.0.0
+api-version: 1.21
+author: ChatGPT
+description: "TRON: Legacy-inspired world generator (Grid cityscape + rare snowy Outlands). Multiverse generator name: TronLegacyGen."
+commands:
+  trongen:
+    description: TronLegacyGen control command
+    usage: /trongen reload
+    permission: trongen.admin
+permissions:
+  trongen.admin:
+    default: op

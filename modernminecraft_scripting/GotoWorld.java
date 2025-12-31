@@ -3,6 +3,7 @@ package com.redchanit.gotoworld;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.InputStream;
+import java.lang.reflect.Method;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -12,6 +13,7 @@ import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
+import org.bukkit.WorldCreator;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -19,25 +21,27 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 public class GotoWorld extends JavaPlugin {
 
-    // Simple anti-spam cooldown for teleports
     private static final long COOLDOWN_MS = 5000L;
 
     private final Map<UUID, Long> lastUseTime = new HashMap<UUID, Long>();
 
-    // Cached from server.properties "level-name"
     private String defaultWorldName = null;
+
+    // Cached reflection lookup for teleportAsync (present on modern Spigot)
+    private Method teleportAsyncMethod = null;
 
     @Override
     public void onEnable() {
         defaultWorldName = readDefaultWorldNameFromServerProperties();
 
         if (defaultWorldName == null || defaultWorldName.trim().isEmpty()) {
-            // Fallback: first loaded world if properties missing
             List<World> worlds = Bukkit.getServer().getWorlds();
             if (!worlds.isEmpty()) {
                 defaultWorldName = worlds.get(0).getName();
             }
         }
+
+        teleportAsyncMethod = findTeleportAsyncMethod();
 
         if (defaultWorldName != null) {
             getLogger().info("Enabled. Default world (main) is: " + defaultWorldName);
@@ -118,7 +122,7 @@ public class GotoWorld extends JavaPlugin {
     }
 
     private boolean teleportPlayerToWorld(Player player, String requestedWorldName) {
-        // Cooldown check (applies to /goto and /main)
+        // Cooldown check
         UUID playerId = player.getUniqueId();
         long now = System.currentTimeMillis();
 
@@ -132,17 +136,39 @@ public class GotoWorld extends JavaPlugin {
             }
         }
 
-        World targetWorld = findWorldIgnoreCase(requestedWorldName);
+        // 1) Try to find the world if already loaded
+        World targetWorld = resolveWorld(requestedWorldName);
+
+        // 2) If not loaded, attempt to load it from disk (this is the key for _nether/_the_end folders)
         if (targetWorld == null) {
-            player.sendMessage("That world is not loaded or does not exist.");
+            targetWorld = tryLoadWorldFromDisk(requestedWorldName);
+        }
+
+        if (targetWorld == null) {
+            player.sendMessage("That world is not loaded or does not exist on disk.");
             return true;
         }
 
-        Location targetLocation = targetWorld.getSpawnLocation();
-        player.teleport(targetLocation);
-        player.sendMessage("Teleported to world: " + targetWorld.getName());
+        // Always build a Location explicitly tied to the targetWorld
+        Location spawn = targetWorld.getSpawnLocation();
+        Location targetLocation = new Location(
+                targetWorld,
+                spawn.getX(),
+                spawn.getY(),
+                spawn.getZ(),
+                spawn.getYaw(),
+                spawn.getPitch()
+        );
 
-        lastUseTime.put(playerId, now);
+        boolean teleportStarted = teleportPlayerPreferAsync(player, targetLocation);
+
+        if (teleportStarted) {
+            player.sendMessage("Teleported to world: " + targetWorld.getName());
+            lastUseTime.put(playerId, now);
+        } else {
+            player.sendMessage("Teleport failed.");
+        }
+
         return true;
     }
 
@@ -160,6 +186,9 @@ public class GotoWorld extends JavaPlugin {
         for (int worldIndex = 0; worldIndex < worlds.size(); worldIndex++) {
             World world = worlds.get(worldIndex);
             sb.append(world.getName());
+            sb.append(" (");
+            sb.append(world.getEnvironment().name().toLowerCase());
+            sb.append(")");
             if (worldIndex < worlds.size() - 1) {
                 sb.append(", ");
             }
@@ -176,19 +205,74 @@ public class GotoWorld extends JavaPlugin {
         return true;
     }
 
-    private World findWorldIgnoreCase(String name) {
+    private World resolveWorld(String requestedWorldName) {
+        // Exact first (fast path)
+        World exact = Bukkit.getWorld(requestedWorldName);
+        if (exact != null) {
+            return exact;
+        }
+
+        // Case-insensitive scan
         List<World> worlds = Bukkit.getServer().getWorlds();
         for (World world : worlds) {
-            if (world.getName().equalsIgnoreCase(name)) {
+            if (world.getName().equalsIgnoreCase(requestedWorldName)) {
                 return world;
             }
         }
+
         return null;
     }
 
+    private World tryLoadWorldFromDisk(String requestedWorldName) {
+        // If a folder exists for that world, Bukkit can usually load it
+        File worldFolder = new File(Bukkit.getWorldContainer(), requestedWorldName);
+        if (!worldFolder.exists() || !worldFolder.isDirectory()) {
+            return null;
+        }
+
+        try {
+            getLogger().info("World not loaded; attempting to load from disk: " + requestedWorldName);
+
+            WorldCreator creator = new WorldCreator(requestedWorldName);
+            World created = Bukkit.createWorld(creator);
+
+            if (created != null) {
+                getLogger().info("Loaded world: " + created.getName() + " (" + created.getEnvironment() + ")");
+            }
+
+            return created;
+        } catch (Exception ex) {
+            getLogger().warning("Failed to load world '" + requestedWorldName + "': " + ex.getMessage());
+            return null;
+        }
+    }
+
+    private Method findTeleportAsyncMethod() {
+        try {
+            // Signature: CompletableFuture<Boolean> teleportAsync(Location)
+            return Player.class.getMethod("teleportAsync", Location.class);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean teleportPlayerPreferAsync(Player player, Location targetLocation) {
+        // Prefer teleportAsync if present (helps cross-world/dimension + chunk safety)
+        if (teleportAsyncMethod != null) {
+            try {
+                Object result = teleportAsyncMethod.invoke(player, targetLocation);
+                // We don't need to block; just treat invocation as "started"
+                return result != null;
+            } catch (Exception ex) {
+                // Fallback to sync teleport below
+                getLogger().warning("teleportAsync failed; falling back to teleport(): " + ex.getMessage());
+            }
+        }
+
+        return player.teleport(targetLocation);
+    }
+
     private String readDefaultWorldNameFromServerProperties() {
-        // Spigot servers typically run with working directory at the server root,
-        // so relative "server.properties" should resolve correctly.
         File propsFile = new File("server.properties");
         if (!propsFile.exists() || !propsFile.isFile()) {
             return null;

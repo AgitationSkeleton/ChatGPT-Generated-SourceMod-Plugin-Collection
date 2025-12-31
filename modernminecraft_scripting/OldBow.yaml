@@ -1,0 +1,10 @@
+name: OldBow
+main: OldBow
+version: 3.0.0
+api-version: "1.21"
+author: ChatGPT
+depend: [ProtocolLib]
+commands:
+  oldbow:
+    description: Convert an unenchanted bow into an Old Bow. /oldbow reload (op)
+    usage: /oldbow [reload]

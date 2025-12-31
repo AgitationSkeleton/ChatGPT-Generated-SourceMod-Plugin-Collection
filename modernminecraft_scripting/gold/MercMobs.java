@@ -52,8 +52,6 @@ public final class MercMobs extends JavaPlugin implements Listener {
     private static final String CIT_KEY_COLOR = "mercmobs_color";        // "red" | "blue" | "green" | "yellow" | "none"
     private static final String CIT_KEY_STATE = "mercmobs_state";        // "wild_neutral" | "wild_angry" | "tame"
     private static final String CIT_KEY_OWNER = "mercmobs_owner";        // UUID string
-    private static final String CIT_KEY_COOWNERS = "mercmobs_coowners";  // comma-separated UUIDs
-    private static final String CIT_KEY_LEADER = "mercmobs_leader";      // UUID string (who this merc is currently following)
     private static final String CIT_KEY_ASSIST_TARGET = "mercmobs_assist_target"; // UUID string (non-persistent)
     private static final String CIT_KEY_ASSIST_UNTIL_MS = "mercmobs_assist_until_ms"; // long (non-persistent)
     private static final String CIT_KEY_MODE = "mercmobs_mode";          // "follow" | "defend" | "patrol"
@@ -376,7 +374,7 @@ public final class MercMobs extends JavaPlugin implements Listener {
         if (!command.getName().equalsIgnoreCase("mercs")) return false;
 
         if (args.length == 0) {
-            sender.sendMessage("Usage: /mercs <stop|follow|patrol|share|unshare|spawn|reload|status>");
+            sender.sendMessage("Usage: /mercs <stop|follow|patrol|spawn|reload|status>");
             return true;
         }
 
@@ -489,72 +487,16 @@ Location base = snapToSurface(player.getLocation());
 			}
 
 
-        
-if (sub.equals("share") || sub.equals("unshare")) {
-    if (!(sender instanceof Player)) {
-        sender.sendMessage("Players only.");
-        return true;
-    }
-    if (args.length < 2) {
-        player.sendMessage("Usage: /mercs " + sub + " <playerName>");
-        return true;
-    }
-    String targetName = args[1];
-    org.bukkit.OfflinePlayer off = Bukkit.getOfflinePlayer(targetName);
-    UUID targetUuid = (off != null) ? off.getUniqueId() : null;
-    if (targetUuid == null) {
-        player.sendMessage("Could not resolve player '" + targetName + "'.");
-        return true;
-    }
-
-    int changed = 0;
-    NPCRegistry reg;
-    try { reg = CitizensAPI.getNPCRegistry(); } catch (Throwable t) { reg = null; }
-
-    if (reg != null) {
-        for (NPC npc : reg) {
-            if (npc == null) continue;
-            if (npc.data().get(CIT_KEY_MERCMOBS) == null) continue;
-            if (!Boolean.TRUE.equals(npc.data().get(CIT_KEY_MERCMOBS))) continue;
-            if (getMercState(npc) != MercState.TAME) continue;
-
-            UUID ownerUuid = getOwnerUuid(npc);
-            if (ownerUuid == null || !ownerUuid.equals(player.getUniqueId())) continue; // only true owner can share
-
-            java.util.Set<UUID> co = getCoOwnerUuids(npc);
-            if (sub.equals("share")) {
-                if (co.add(targetUuid)) {
-                    setCoOwnerUuids(npc, co);
-                    changed++;
-                }
-            } else {
-                if (co.remove(targetUuid)) {
-                    // If they were the active leader, revert to owner
-                    UUID leader = getLeaderUuid(npc);
-                    if (leader != null && leader.equals(targetUuid)) {
-                        setLeaderUuid(npc, ownerUuid);
-                    }
-                    setCoOwnerUuids(npc, co);
-                    changed++;
-                }
-            }
-        }
-    }
-
-    player.sendMessage((sub.equals("share") ? "Shared" : "Unshared") + " your Mercs with " + targetName + ". (" + changed + " updated)");
-    return true;
-}
-
-MercMode requested;
+        MercMode requested;
         if (sub.equals("stop")) requested = MercMode.DEFEND;
         else if (sub.equals("follow")) requested = MercMode.FOLLOW;
         else if (sub.equals("patrol")) requested = MercMode.PATROL;
         else {
-            sender.sendMessage("Usage: /mercs <stop|follow|patrol|share|unshare|spawn|reload|status>");
+            sender.sendMessage("Usage: /mercs <stop|follow|patrol|spawn|reload|status>");
             return true;
         }
 
-        int outOfRange = setModeForControlledMercsInRange(player, requested);
+        int outOfRange = setModeForOwnedMercsInRange(player, requested);
 
         if (outOfRange > 0) {
             String tmpl = getConfig().getString("messages.outOfRangeTemplate",
@@ -595,7 +537,7 @@ MercMode requested;
         // Food heal (tamed only)
         if (state == MercState.TAME && getConfig().getBoolean("healing.food.enabled", true)) {
             UUID owner = getOwnerUuid(npc);
-            if (isOwnerOrCoOwner(npc, player)) {
+            if (owner != null && owner.equals(player.getUniqueId())) {
                 if (mat != Material.AIR && mat != Material.ROTTEN_FLESH && mat.isEdible()) {
                     LivingEntity living = (clicked instanceof LivingEntity) ? (LivingEntity) clicked : null;
                     if (living != null) {
@@ -666,16 +608,13 @@ MercMode requested;
             }
         }
 
-        // Owner/co-owner click toggles defend/follow (tamed only)
+        // Owner click toggles defend/follow (tamed only)
         if (state == MercState.TAME) {
             UUID owner = getOwnerUuid(npc);
-            if (isOwnerOrCoOwner(npc, player)) {
+            if (owner != null && owner.equals(player.getUniqueId())) {
                 // If holding a taming item or food we already handled, otherwise toggle mode
                 MercMode mode = getMercMode(npc);
                 MercMode newMode = (mode == MercMode.DEFEND) ? MercMode.FOLLOW : MercMode.DEFEND;
-                if (newMode == MercMode.FOLLOW) {
-                    setLeaderUuid(npc, player.getUniqueId());
-                }
                 setMercMode(npc, newMode);
 
                 String msg = randomFrom(getConfig().getStringList(
@@ -1750,68 +1689,48 @@ private Location getPatrolAnchorLocation(NPC npc, Player owner) {
 }
 
 
-
 private void handleTamedBehavior(NPC npc, LivingEntity living, MercMode mode) {
         UUID ownerUuid = getOwnerUuid(npc);
         if (ownerUuid == null) {
-            // No owner - do NOT persistently overwrite mode; just idle
-            try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
+            // no owner -> defensive idle
+            setMercMode(npc, MercMode.DEFEND);
             return;
         }
-
-        // Determine who this merc should follow (leader). Defaults to owner.
-        UUID leaderUuid = getLeaderUuid(npc);
-        if (leaderUuid == null) leaderUuid = ownerUuid;
 
         Player owner = Bukkit.getPlayer(ownerUuid);
-        Player leader = Bukkit.getPlayer(leaderUuid);
-
-        // If leader is not online/valid, fall back to owner (if online)
-        if (leader == null || !leader.isOnline()) leader = (owner != null && owner.isOnline()) ? owner : null;
-
-        // PATROL should work even if owner is offline: uses stored patrol anchor
-        if (mode == MercMode.PATROL) {
-            handlePatrolMode(npc, living);
-            return;
-        }
-
-        // For FOLLOW/DEFEND: if owner missing/offline, optionally auto-defend WITHOUT overwriting saved mode
         if (owner == null || !owner.isOnline()) {
             if (getConfig().getBoolean("tamed.autoDefendOnOwnerMissing", true)) {
-                try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
+                setMercMode(npc, MercMode.DEFEND);
             }
             return;
         }
 
         // World-group follow rule: only follow across overworld/nether/end if base matches
-        if (mode == MercMode.FOLLOW) {
-            String mercBase = worldBaseName(living.getWorld().getName());
-            String ownerBase = worldBaseName(owner.getWorld().getName());
-            if (!Objects.equals(mercBase, ownerBase)) {
-                // unrelated -> idle without overwriting saved mode
-                try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
-                return;
-            }
+        String mercBase = worldBaseName(living.getWorld().getName());
+        String ownerBase = worldBaseName(owner.getWorld().getName());
+        if (!Objects.equals(mercBase, ownerBase)) {
+            // unrelated -> defensive
+            setMercMode(npc, MercMode.DEFEND);
+            return;
         }
 
-        // FOLLOW: path to leader (owner by default) + teleport if far (safe across world transitions)
+        // FOLLOW: path to owner + teleport if far (safe across world transitions)
                 if (mode == MercMode.FOLLOW) {
-                    Player followTarget = (leader != null && leader.isOnline()) ? leader : owner;
                     // followRange = distance at which the merc starts moving toward the owner
                     double followRange = Math.max(6.0, getConfig().getDouble("tamed.followRange", 14.0));
                     // followStopDistance = "personal space" distance; within this, the merc should stop navigating
                     double followStop = Math.max(2.0, getConfig().getDouble("tamed.followStopDistance", 4.0));
                     double teleportDist = Math.max(followRange + 6.0, getConfig().getDouble("tamed.teleportIfFartherThan", 28.0));
 
-                    boolean differentWorld = !followTarget.getWorld().equals(living.getWorld());
+                    boolean differentWorld = !owner.getWorld().equals(living.getWorld());
                     if (differentWorld) {
                         // Same world-group but different actual world (overworld/nether/end). Teleport near owner.
-                        Location tp = findSafeNear(followTarget.getLocation(), 3);
+                        Location tp = findSafeNear(owner.getLocation(), 3);
                         if (tp != null) {
                             try { living.teleport(tp); } catch (Throwable ignored) {}
                         }
                     } else {
-                        Location ownerLoc = followTarget.getLocation();
+                        Location ownerLoc = owner.getLocation();
                         Location mercLoc = living.getLocation();
 
                         double d2 = ownerLoc.distanceSquared(mercLoc);
@@ -1861,33 +1780,7 @@ private void handleTamedBehavior(NPC npc, LivingEntity living, MercMode mode) {
         }
     }
 
-    
-
-private void handlePatrolMode(NPC npc, LivingEntity living) {
-    // PATROL: wander around the stored patrol anchor (or owner if available).
-    Location anchor = null;
-    try {
-        UUID ownerUuid = getOwnerUuid(npc);
-        Player owner = (ownerUuid != null) ? Bukkit.getPlayer(ownerUuid) : null;
-        anchor = getPatrolAnchorLocation(npc, owner);
-    } catch (Throwable ignored) {}
-    if (anchor == null) {
-        // If we have no anchor, just don't move.
-        try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
-        return;
-    }
-
-    double patrolRadius = Math.max(8.0, getConfig().getDouble("tamed.patrolRadius", 20.0));
-    Navigator nav = npc.getNavigator();
-    if (nav != null && !nav.isNavigating()) {
-        Location target = pickWanderTarget(anchor, (int) Math.round(patrolRadius));
-        if (target != null) {
-            try { nav.getLocalParameters().speedModifier(1.0f); } catch (Throwable ignored) {}
-            nav.setTarget(target);
-        }
-    }
-}
-private void handleDefendMode(NPC npc, LivingEntity living, Player owner) {
+    private void handleDefendMode(NPC npc, LivingEntity living, Player owner) {
         // DEFEND = stand still; combat targeting handled elsewhere.
         try {
             Navigator nav = npc.getNavigator();
@@ -2471,67 +2364,54 @@ private void handleJackBlackChat(NPC npc, LivingEntity jack) {
     // -------------------------------------------------------------------------
     // /mercs mode changes in range + owner messages
     // -------------------------------------------------------------------------
-    private int setModeForControlledMercsInRange(Player commander, MercMode mode) {
-    double hear = Math.max(6.0, getConfig().getDouble("tamed.commandHearRange", 32.0));
-    double hear2 = hear * hear;
+    private int setModeForOwnedMercsInRange(Player owner, MercMode mode) {
+        double hear = Math.max(6.0, getConfig().getDouble("tamed.commandHearRange", 32.0));
+        double hear2 = hear * hear;
 
-    int outOfRange = 0;
+        int outOfRange = 0;
 
-    for (UUID entId : new ArrayList<>(npcIdByEntity.keySet())) {
-        Entity ent = Bukkit.getEntity(entId);
-        if (!(ent instanceof LivingEntity) || ent.isDead() || !ent.isValid()) continue;
+        for (UUID entId : new ArrayList<>(npcIdByEntity.keySet())) {
+            Entity ent = Bukkit.getEntity(entId);
+            if (!(ent instanceof LivingEntity) || ent.isDead() || !ent.isValid()) continue;
 
-        NPC npc = getNpcByEntityUuid(entId);
-        if (npc == null) continue;
-        if (!isOurNpc(npc, ent)) continue;
+            NPC npc = getNpcByEntityUuid(entId);
+            if (npc == null) continue;
+            if (!isOurNpc(npc, ent)) continue;
 
-        if (getMercState(npc) != MercState.TAME) continue;
-        if (!isOwnerOrCoOwner(npc, commander)) continue;
+            if (getMercState(npc) != MercState.TAME) continue;
+            UUID o = getOwnerUuid(npc);
+            if (o == null || !o.equals(owner.getUniqueId())) continue;
 
-        // must be in same world group and within range
-        boolean inRange = sameWorldGroup(commander.getWorld().getName(), ent.getWorld().getName())
-                && ent.getWorld().equals(commander.getWorld())
-                && ent.getLocation().distanceSquared(commander.getLocation()) <= hear2;
+            // must be in same world group and within range
+            String mercBase = worldBaseName(ent.getWorld().getName());
+            String ownerBase = worldBaseName(owner.getWorld().getName());
+            boolean sameGroup = Objects.equals(mercBase, ownerBase);
 
-        if (!inRange) {
-            outOfRange++;
-            continue;
+            boolean inRange = sameGroup
+                    && ent.getWorld().equals(owner.getWorld())
+                    && ent.getLocation().distanceSquared(owner.getLocation()) <= hear2;
+
+            if (!inRange) {
+                outOfRange++;
+                continue;
+            }
+
+            setMercMode(npc, mode);
+
+            MercColor color = getMercColor(npc);
+            MercType type = getMercType(npc);
+
+            String key = (mode == MercMode.DEFEND) ? "messages.defend"
+                    : (mode == MercMode.PATROL) ? "messages.patrol"
+                    : "messages.follow";
+
+            String msg = randomFrom(getConfig().getStringList(key));
+            if (msg == null) msg = "Yes, sir!";
+            owner.sendMessage(getPrefixFor(color, type) + msg);
         }
 
-        // Cancel any current navigation so a mode switch takes effect immediately
-        try { npc.getNavigator().cancelNavigation(); } catch (Throwable ignored) {}
-
-        // FOLLOW should follow whoever issued the command (owner or co-owner)
-        if (mode == MercMode.FOLLOW) {
-            setLeaderUuid(npc, commander.getUniqueId());
-        }
-
-        // PATROL should patrol around the command issuer's current location
-        if (mode == MercMode.PATROL) {
-            try {
-                Location a = commander.getLocation();
-                String packed = a.getWorld().getName() + "," + a.getX() + "," + a.getY() + "," + a.getZ();
-                npc.data().setPersistent(CIT_KEY_PATROL_ANCHOR, packed);
-            } catch (Throwable ignored) {}
-        }
-
-        setMercMode(npc, mode);
-
-        MercColor color = getMercColor(npc);
-        MercType type = getMercType(npc);
-
-        String key = (mode == MercMode.DEFEND) ? "messages.defend"
-                : (mode == MercMode.PATROL) ? "messages.patrol"
-                : "messages.follow";
-
-        String msg = randomFrom(getConfig().getStringList(key));
-        if (msg == null) msg = "Yes, sir!";
-        commander.sendMessage(getPrefixFor(color, type) + msg);
+        return outOfRange;
     }
-
-    return outOfRange;
-}
-
 
     private String getPrefixFor(MercColor color, MercType type) {
         if (type == MercType.JACKBLACK) return getConfig().getString("messages.prefix.jackblack", "<Jack Black> ");
@@ -3550,50 +3430,6 @@ private void maybeAutoHeal(NPC npc, LivingEntity living) {
     private void setOwnerUuid(NPC npc, UUID owner) {
         npc.data().setPersistent(CIT_KEY_OWNER, owner.toString());
     }
-
-private UUID getLeaderUuid(NPC npc) {
-    String s = safeString(npc.data().get(CIT_KEY_LEADER), null);
-    if (s == null || s.trim().isEmpty()) return null;
-    try { return UUID.fromString(s.trim()); }
-    catch (Throwable ignored) { return null; }
-}
-
-private void setLeaderUuid(NPC npc, UUID leader) {
-    if (leader == null) {
-        try { npc.data().remove(CIT_KEY_LEADER); } catch (Throwable ignored) {}
-        return;
-    }
-    npc.data().setPersistent(CIT_KEY_LEADER, leader.toString());
-}
-
-private java.util.Set<UUID> getCoOwnerUuids(NPC npc) {
-    String s = safeString(npc.data().get(CIT_KEY_COOWNERS), "");
-    java.util.Set<UUID> out = new java.util.HashSet<>();
-    if (s == null || s.trim().isEmpty()) return out;
-    for (String part : s.split(",")) {
-        String t = part.trim();
-        if (t.isEmpty()) continue;
-        try { out.add(UUID.fromString(t)); } catch (Throwable ignored) {}
-    }
-    return out;
-}
-
-private void setCoOwnerUuids(NPC npc, java.util.Set<UUID> coOwners) {
-    if (coOwners == null || coOwners.isEmpty()) {
-        try { npc.data().remove(CIT_KEY_COOWNERS); } catch (Throwable ignored) {}
-        return;
-    }
-    String joined = coOwners.stream().map(UUID::toString).collect(java.util.stream.Collectors.joining(","));
-    npc.data().setPersistent(CIT_KEY_COOWNERS, joined);
-}
-
-private boolean isOwnerOrCoOwner(NPC npc, Player player) {
-    if (npc == null || player == null) return false;
-    UUID owner = getOwnerUuid(npc);
-    if (owner != null && owner.equals(player.getUniqueId())) return true;
-    return getCoOwnerUuids(npc).contains(player.getUniqueId());
-}
-
 
     private UUID getAngryTarget(NPC npc) {
         String s = safeString(npc.data().get(CIT_KEY_ANGRY_TARGET), null);

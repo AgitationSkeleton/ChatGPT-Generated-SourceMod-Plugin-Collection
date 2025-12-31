@@ -477,7 +477,9 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             UUID uuid = entry.getKey();
             Entity entity = Bukkit.getEntity(uuid);
             if (entity == null || !entity.isValid() || entity.isDead()) {
-                cleanupTrackedIndevMob(uuid, true);
+                iterator.remove();
+                citizensNpcIdByEntity.remove(uuid);
+                removeDynmapMarker(uuid);
                 continue;
             }
             if (entity.getWorld().equals(world)) count++;
@@ -821,10 +823,7 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             for (Map.Entry<UUID, String> entry : spawnedEntities.entrySet()) {
                 UUID uuid = entry.getKey();
                 Entity entity = Bukkit.getEntity(uuid);
-                if (entity == null || !entity.isValid() || entity.isDead()) {
-                    cleanupTrackedIndevMob(uuid, true);
-                    continue;
-                }
+                if (entity == null || !entity.isValid() || entity.isDead()) continue;
 
                 NPC npc = getNpcByEntityUuid(uuid);
                 if (npc != null) {
@@ -882,9 +881,11 @@ public final class IndevMobs extends JavaPlugin implements Listener {
 
                 Entity entity = Bukkit.getEntity(uuid);
                 if (entity == null || !entity.isValid() || entity.isDead()) {
-                cleanupTrackedIndevMob(uuid, true);
-                continue;
-            }
+                    iterator.remove();
+                    citizensNpcIdByEntity.remove(uuid);
+                    removeDynmapMarker(uuid);
+                    continue;
+                }
 
                 NPC npc = getNpcByEntityUuid(uuid);
                 if (npc == null || !npc.isSpawned()) continue;
@@ -988,8 +989,8 @@ public final class IndevMobs extends JavaPlugin implements Listener {
         event.getDrops().clear();
         event.getDrops().addAll(buildDropsFor(mobType));
 
-        // Clean up tracking + dynmap marker + Citizens NPC
-        cleanupTrackedIndevMob(event.getEntity().getUniqueId(), true);
+        // Remove dynmap marker immediately
+        removeDynmapMarker(event.getEntity().getUniqueId());
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
@@ -1068,48 +1069,6 @@ public final class IndevMobs extends JavaPlugin implements Listener {
             return entity.getPersistentDataContainer().get(indevMobTypeKey, PersistentDataType.STRING);
         } catch (Throwable ignored) {}
         return null;
-    }
-
-    // -------------------------------------------------------------------------
-    // Tracking cleanup
-    // -------------------------------------------------------------------------
-
-    /**
-     * Remove an IndevMob from internal tracking and (if present) destroy the Citizens NPC.
-     * This prevents the Citizens NPC registry from accumulating dead/invalid IndevMobs.
-     */
-    private void cleanupTrackedIndevMob(UUID entityUuid, boolean removeMarker) {
-        if (entityUuid == null) return;
-
-        // Remove from our internal maps first
-        spawnedEntities.remove(entityUuid);
-
-        Integer npcId = citizensNpcIdByEntity.remove(entityUuid);
-
-        if (removeMarker) {
-            removeDynmapMarker(entityUuid);
-        }
-
-        if (!citizensAvailable) return;
-
-        try {
-            NPC npc = null;
-            if (npcId != null) {
-                npc = CitizensAPI.getNPCRegistry().getById(npcId);
-            } else {
-                npc = getNpcByEntityUuid(entityUuid);
-            }
-            if (npc != null) {
-                try {
-                    if (npc.isSpawned()) {
-                        npc.despawn();
-                    }
-                } catch (Throwable ignored) {}
-                try {
-                    npc.destroy();
-                } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
     }
 
     // -------------------------------------------------------------------------

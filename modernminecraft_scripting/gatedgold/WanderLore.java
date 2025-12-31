@@ -3,7 +3,6 @@ package com.redchanit.wanderlore;
 import org.bukkit.*;
 import org.bukkit.block.Block;
 import org.bukkit.block.Chest;
-import org.bukkit.block.Lectern;
 import org.bukkit.block.Sign;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -251,7 +250,7 @@ public class WanderLore extends JavaPlugin implements Listener {
         cfg.set("enabled", true);
         cfg.set("debugLog", false);
 
-        cfg.set("worlds.allowList", Arrays.asList("world"));
+        cfg.set("worlds.allowList", Arrays.asList("world", "world_nether", "world_the_end", "tedkraft_world", "tedkraft_world_nether", "tedkraft_world_the_end"));
         cfg.set("generation.minDistanceFromSpawnBlocks", 1200);
         cfg.set("generation.structureChancePerNewChunk", 0.0018); // legacy (overworld fallback)
         cfg.set("generation.structureChance.overworld", 0.0018); // 0.18% per new chunk
@@ -288,23 +287,7 @@ public class WanderLore extends JavaPlugin implements Listener {
                 "Do not drink from the red basin under the quiet moon.",
                 "When the map shows a circle, walk the line instead.",
                 "The watchers do not blink. They only relocate.",
-                "The door that is not a door opens when you stop trying.",
-                "\"Parliament\" is a room with no walls. Its votes echo in caves.",
-                "PROP-471A: \"Do not correct the record. Create a bureau instead.\"",
-                "Five parties, six names, and a Bishop who never leaves the chair.",
-                "An Emperor's veto is a mirror. A majority vote is a hammer.",
-                "Some parties were banned. Some were \"defunct.\" One was... magical.",
-                "\"Wizards and Magicians\" vanished from the rolls. Their ink still stains.",
-                "Armistice Articles I–VIII: surrender written as mercy.",
-                "\"Twin Lakes\" became \"Protectorate\" the moment the ink dried.",
-                "Freedom of passage is a promise and a leash.",
-                "Look for green banners where the frontier turns to rail.",
-                "Embassy stones remember every oath, even the ones whispered.",
-                "Rivendell Outpost: supplies labeled like a prayer in the Nether.",
-                "Primoria's name appears twice on the road, as if to make it true.",
-                "\"Hail to Viridia\" was sung in a tunnel where no birds live.",
-                "Observers do not vote. They only watch. The watchers watch them.",
-                "Help is written on a sign at (4719, 64, 3543). Was it answered?"
+                "The door that is not a door opens when you stop trying."
         ));
 
         cfg.set("lore.npcNames", Arrays.asList(
@@ -333,13 +316,9 @@ public class WanderLore extends JavaPlugin implements Listener {
                 "HANGING_TRIAL",
                 "RUINED_WATCHTOWER",
                 "BURIED_CRYPT",
-                "LOST_LIBRARY",
-                "IMPERIAL_BUREAU_OUTPOST",
-                "EMBASSY_WAYSTATION",
-                "ARMISTICE_BUNKER",
-                "RIVENDELL_CACHE",
-                "END_ARCHIVE_SPIRE"
+                "LOST_LIBRARY"
         ));
+
         // Environment-specific structure pools (preferred; legacy list above still honored)
         cfg.set("structures.overworld.enabled", Arrays.asList(
                 "RUINED_COTTAGE",
@@ -349,23 +328,19 @@ public class WanderLore extends JavaPlugin implements Listener {
                 "HANGING_TRIAL",
                 "RUINED_WATCHTOWER",
                 "BURIED_CRYPT",
-                "LOST_LIBRARY",
-                "IMPERIAL_BUREAU_OUTPOST",
-                "EMBASSY_WAYSTATION",
-                "ARMISTICE_BUNKER"
+                "LOST_LIBRARY"
         ));
         cfg.set("structures.nether.enabled", Arrays.asList(
                 "NETHER_SIGNAL_PYLON",
                 "BASALT_ALTAR",
-                "FORGOTTEN_HALL",
-                "RIVENDELL_CACHE"
+                "FORGOTTEN_HALL"
         ));
         cfg.set("structures.end.enabled", Arrays.asList(
                 "ENDER_OBELISK",
                 "VOID_RUIN",
-                "CHORUS_MAZE",
-                "END_ARCHIVE_SPIRE"
+                "CHORUS_MAZE"
         ));
+
         // Alive-world defaults
         cfg.set("aliveWorld.enable", true);
 
@@ -763,7 +738,7 @@ if (args[0].equalsIgnoreCase("purgeAllNpcs") || args[0].equalsIgnoreCase("purgea
             }
 
             if (integrateCitizens && r.nextBoolean()) {
-                spawnCitizensNpcIfPossible(origin.clone().add(2, 0, 2), makeNpcId(world, origin), "wanderer", r);
+                spawnCitizensNpcIfPossible(origin.clone().add(2, 0, 2), makeNpcId(world, origin), r);
             }
 
             return true;
@@ -1522,7 +1497,7 @@ if (args[0].equalsIgnoreCase("purgeAllNpcs") || args[0].equalsIgnoreCase("purgea
                 if (debugLog) getLogger().info("NPC cap reached in " + world.getName() + " (" + maxNpcsPerWorld + "); skipping NPC spawn.");
             } else if (chunkRandom.nextDouble() <= npcChanceGivenStructure) {
                 Location npcLoc = origin.clone().add(2, 0, 2);
-                spawnCitizensNpcIfPossible(npcLoc, makeNpcId(world, origin), roleForStructure(type), chunkRandom);
+                spawnCitizensNpcIfPossible(npcLoc, makeNpcId(world, origin), chunkRandom);
             }
         }
     }
@@ -1634,21 +1609,16 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
         case RUINED_WATCHTOWER -> genRuinedWatchtower(origin, r);
         case BURIED_CRYPT -> genBuriedCrypt(origin, r);
         case LOST_LIBRARY -> genLostLibrary(origin, r);
-        case IMPERIAL_BUREAU_OUTPOST -> genImperialBureauOutpost(origin, r);
-        case EMBASSY_WAYSTATION -> genEmbassyWaystation(origin, r);
-        case ARMISTICE_BUNKER -> genArmisticeBunker(origin, r);
 
         // Nether
         case NETHER_SIGNAL_PYLON -> genNetherSignalPylon(origin, r);
         case BASALT_ALTAR -> genBasaltAltar(origin, r);
         case FORGOTTEN_HALL -> genForgottenHall(origin, r);
-        case RIVENDELL_CACHE -> genRivendellCache(origin, r);
 
         // End
         case ENDER_OBELISK -> genEnderObelisk(origin, r);
         case VOID_RUIN -> genVoidRuin(origin, r);
         case CHORUS_MAZE -> genChorusMaze(origin, r);
-        case END_ARCHIVE_SPIRE -> genEndArchiveSpire(origin, r);
     };
 }
 
@@ -1973,21 +1943,6 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
     // -----------------------------
     // Lore items
     // -----------------------------
-    private String getRandomFragment(Random r) {
-        List<String> fragments = getConfig().getStringList("lore.fragments");
-        if (fragments == null || fragments.isEmpty()) {
-            fragments = Arrays.asList(
-                    "The banners were greener before the vote.",
-                    "PROP-471A was filed twice. Once forward, once backward.",
-                    "Twin Lakes is a protectorate on paper. Paper burns.",
-                    "If you see the lime marker, do not follow the path.",
-                    "The embassy keeps names, not faces."
-            );
-        }
-        return fragments.get(r.nextInt(fragments.size()));
-    }
-
-
     private ItemStack makeLoreBook(World w, Random r, String chapterTag) {
         ItemStack book = new ItemStack(Material.WRITTEN_BOOK);
         BookMeta meta = (BookMeta) book.getItemMeta();
@@ -2061,11 +2016,8 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
 
         incrementSeen(player, keySeenNpcs);
 
-        String role = getNpcRole(npcId);
-
         player.sendMessage(color("&7[&bWanderLore&7] &fThe figure turns its head a little too smoothly."));
-        player.sendMessage(color("&7[&bWanderLore&7] &f" + roleIntro(role)));
-        player.sendMessage(color("&7[&bWanderLore&7] &fIt asks: &b\"" + roleQuestion(role) + "\" &7(&aYES&7/&cNO&7)"));
+        player.sendMessage(color("&7[&bWanderLore&7] &fIt asks: &b\"Did you come here on purpose?\" &7(&aYES&7/&cNO&7)"));
 
         new BukkitRunnable() {
             @Override
@@ -2109,20 +2061,12 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
         }
 
         if (session.stage == 2) {
-            String role = getNpcRole(session.npcId);
             if (answer.equals("yes")) {
-                player.sendMessage(color("&7[&bWanderLore&7] &f" + roleYesReply(role)));
+                player.sendMessage(color("&7[&bWanderLore&7] &f\"That's the right kind of lie.\""));
             } else {
-                player.sendMessage(color("&7[&bWanderLore&7] &f" + roleNoReply(role)));
+                player.sendMessage(color("&7[&bWanderLore&7] &f\"Honesty is loud. The watchers prefer quiet.\""));
             }
-
-            // Some roles drop a physical scrap; others whisper only.
-            if (role.equalsIgnoreCase("bureau_clerk") || role.equalsIgnoreCase("embassy_attache") || role.equalsIgnoreCase("garrison_sentry")) {
-                giveScrapHint(player, role);
-            } else {
-                dropHint(player);
-            }
-
+            dropHint(player);
             dialogueSessions.remove(player.getUniqueId());
         }
     }
@@ -2160,98 +2104,10 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
         }
     }
 
-    
     // -----------------------------
-    // NPC roles (persisted)
-    // -----------------------------
-    private String roleForStructure(StructureType type) {
-        return switch (type) {
-            case IMPERIAL_BUREAU_OUTPOST -> "bureau_clerk";
-            case EMBASSY_WAYSTATION -> "embassy_attache";
-            case ARMISTICE_BUNKER -> "garrison_sentry";
-            case RIVENDELL_CACHE -> "outpost_quartermaster";
-            case END_ARCHIVE_SPIRE -> "chorus_herald";
-            default -> "wanderer";
-        };
-    }
-
-    private void setNpcRole(String npcId, String roleTag) {
-        if (roleTag == null || roleTag.isEmpty()) roleTag = "wanderer";
-        aliveDb.set("npc.roles." + npcId, roleTag);
-        saveAliveDb();
-    }
-
-    private String getNpcRole(String npcId) {
-        String role = aliveDb.getString("npc.roles." + npcId, "wanderer");
-        if (role == null || role.isEmpty()) role = "wanderer";
-        return role;
-    }
-
-    private String roleIntro(String role) {
-        return switch (role.toLowerCase(Locale.ROOT)) {
-            case "bureau_clerk" -> "A clerk's voice leaks through cracked politeness.";
-            case "embassy_attache" -> "It smells faintly of ink, wax, and green cloth.";
-            case "garrison_sentry" -> "A sentry's posture, even when standing still.";
-            case "outpost_quartermaster" -> "Its hands keep counting things that aren't there.";
-            case "chorus_herald" -> "Its words arrive a half-second early, like an echo.";
-            default -> "The air around it feels cataloged.";
-        };
-    }
-
-    private String roleQuestion(String role) {
-        return switch (role.toLowerCase(Locale.ROOT)) {
-            case "bureau_clerk" -> "Will you file what you find, even if it contradicts itself?";
-            case "embassy_attache" -> "Are you here to witness, or to intervene?";
-            case "garrison_sentry" -> "Do you recognize the Armistice as binding?";
-            case "outpost_quartermaster" -> "Did you come for supplies, or for names?";
-            case "chorus_herald" -> "Will you carry a memory to the edge of the world?";
-            default -> "Did you come here on purpose?";
-        };
-    }
-
-    private String roleYesReply(String role) {
-        return switch (role.toLowerCase(Locale.ROOT)) {
-            case "bureau_clerk" -> "Excellent. Accuracy is optional. Consistency is mandatory.";
-            case "embassy_attache" -> "Then sign nothing. Names stick.";
-            case "garrison_sentry" -> "Good. The articles do not forgive improvisation.";
-            case "outpost_quartermaster" -> "Take what you need. Leave what you are.";
-            case "chorus_herald" -> "Then listen closely: the End remembers receipts.";
-            default -> "That's the right kind of lie.";
-        };
-    }
-
-    private String roleNoReply(String role) {
-        return switch (role.toLowerCase(Locale.ROOT)) {
-            case "bureau_clerk" -> "Then you're already in compliance.";
-            case "embassy_attache" -> "Honesty is loud. The watchers prefer quiet.";
-            case "garrison_sentry" -> "Neutrality is a story people tell themselves.";
-            case "outpost_quartermaster" -> "Everything is rationed, even accidents.";
-            case "chorus_herald" -> "Then you were sent. It's the same thing.";
-            default -> "Honesty is loud. The watchers prefer quiet.";
-        };
-    }
-
-    private void giveScrapHint(Player player, String role) {
-        Random r = runtimeRandom;
-        String tag = switch (role.toLowerCase(Locale.ROOT)) {
-            case "bureau_clerk" -> "PROP-471A";
-            case "embassy_attache" -> "EMBASSY";
-            case "garrison_sentry" -> "ARMISTICE";
-            default -> "NOTE";
-        };
-
-        ItemStack scrap = makeScrapNote(r, tag);
-        HashMap<Integer, ItemStack> leftovers = player.getInventory().addItem(scrap);
-        if (!leftovers.isEmpty()) {
-            player.getWorld().dropItemNaturally(player.getLocation(), scrap);
-        }
-        player.sendMessage(color("&7[&bWanderLore&7] &fIt slips you a &bScrap&f."));
-    }
-
-// -----------------------------
     // Citizens integration (reflection)
     // -----------------------------
-    private void spawnCitizensNpcIfPossible(Location loc, String npcId, String roleTag, Random r) {
+    private void spawnCitizensNpcIfPossible(Location loc, String npcId, Random r) {
         Plugin citizens = Bukkit.getPluginManager().getPlugin("Citizens");
         if (citizens == null || !citizens.isEnabled()) {
             if (debugLog) getLogger().info("Citizens not present/enabled; skipping NPC spawn.");
@@ -2293,7 +2149,6 @@ private Location findEndOriginInChunk(World world, int chunkX, int chunkZ, Rando
             if (entObj instanceof Entity e) {
                 spawnedEntity = e;
                 spawnedEntity.setMetadata(META_WANDERLORE_NPC, new FixedMetadataValue(this, npcId));
-                setNpcRole(npcId, roleTag);
             }
             if (debugLog) getLogger().info("Spawned Citizens NPC '" + name + "' at " + serializeLoc(loc) + " id=" + npcId);
 			
@@ -2442,7 +2297,7 @@ private int purgeOwnedNpcs(String worldNameOrNull) {
 
             if (w.getSpawnLocation().distanceSquared(npcLoc) < (double) minDistanceFromSpawnBlocks * minDistanceFromSpawnBlocks) return;
 
-            spawnCitizensNpcIfPossible(npcLoc, "dynmap:" + worldName + ":" + ((int) x) + "," + ((int) y) + "," + ((int) z), "dynmap_watcher", runtimeRandom);
+            spawnCitizensNpcIfPossible(npcLoc, "dynmap:" + worldName + ":" + ((int) x) + "," + ((int) y) + "," + ((int) z), runtimeRandom);
 
         } catch (Throwable t) {
             if (debugLog) getLogger().warning("Dynmap integration failed: " + t.getClass().getSimpleName() + ": " + t.getMessage());
@@ -3041,24 +2896,6 @@ private boolean genChorusMaze(Location origin, Random r) {
 
     }
 
-    private void fillBox(World w, int x1, int y1, int z1, int x2, int y2, int z2, Material mat) {
-        int minX = Math.min(x1, x2);
-        int maxX = Math.max(x1, x2);
-        int minY = Math.min(y1, y2);
-        int maxY = Math.max(y1, y2);
-        int minZ = Math.min(z1, z2);
-        int maxZ = Math.max(z1, z2);
-
-        for (int x = minX; x <= maxX; x++) {
-            for (int y = minY; y <= maxY; y++) {
-                for (int z = minZ; z <= maxZ; z++) {
-                    setBlockSafe(w, x, y, z, mat);
-                }
-            }
-        }
-    }
-
-
     private void maybeScatter(World w, int centerX, int centerY, int centerZ, Material mat, Random r, int attempts) {
     if (w == null || mat == null || r == null) return;
     for (int i = 0; i < attempts; i++) {
@@ -3262,385 +3099,7 @@ private boolean genChorusMaze(Location origin, Random r) {
         return (found != null) ? found : fallback;
     }
 
-    // -----------------------------
-    // New lore-driven structures (Viridia / Twin Lakes / Rivendell / Primoria vibes)
-    // -----------------------------
-
-    private boolean genImperialBureauOutpost(Location origin, Random r) {
-        World w = origin.getWorld();
-        if (w == null) return false;
-
-        Location base = findFlatAreaNear(origin, 7, 7, 5);
-        if (base == null) base = origin;
-
-        int x = base.getBlockX();
-        int y = base.getBlockY();
-        int z = base.getBlockZ();
-
-        // Small stone-brick "bureau" hut with a lectern + dossier chest.
-        Material wall = mat("STONE_BRICKS", Material.STONE_BRICKS);
-        Material floor = mat("POLISHED_ANDESITE", Material.STONE);
-        Material roof = mat("STONE_BRICK_SLAB", Material.STONE_SLAB);
-
-        // footprint 7x7, height 4
-        fillBox(w, x - 3, y, z - 3, x + 3, y, z + 3, floor);
-        hollowBox(w, x - 3, y + 1, z - 3, 7, 4, 7, wall);
-
-        // doorway
-        setBlockSafe(w, x, y + 1, z - 3, Material.AIR);
-        setBlockSafe(w, x, y + 2, z - 3, Material.AIR);
-
-        // windows
-        Material pane = mat("GLASS_PANE", Material.GLASS);
-        setBlockSafe(w, x - 3, y + 2, z, pane);
-        setBlockSafe(w, x + 3, y + 2, z, pane);
-        setBlockSafe(w, x, y + 2, z + 3, pane);
-
-        // roof
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dz = -3; dz <= 3; dz++) {
-                setBlockSafe(w, x + dx, y + 5, z + dz, roof);
-            }
-        }
-
-        // lectern with "PROP-471A" fragment (shortened)
-        setBlockSafe(w, x + 1, y + 1, z + 1, Material.LECTERN);
-        Block lecternBlock = w.getBlockAt(x + 1, y + 1, z + 1);
-        if (lecternBlock.getState() instanceof Lectern lectern) {
-            ItemStack book = makeCustomLoreBook("PROP-471A", r);
-            lectern.getInventory().setItem(0, book);
-            lectern.update(true);
-        }
-
-        // chest with scrap + paper
-        setBlockSafe(w, x - 1, y + 1, z + 1, Material.CHEST);
-        Block cb = w.getBlockAt(x - 1, y + 1, z + 1);
-        if (cb.getState() instanceof Chest chest) {
-            chest.getBlockInventory().clear();
-            chest.getBlockInventory().addItem(makeScrapNote(r, "bureau"));
-            if (r.nextInt(100) < 45) chest.getBlockInventory().addItem(new ItemStack(Material.PAPER, 2 + r.nextInt(5)));
-            if (r.nextInt(100) < 25) chest.getBlockInventory().addItem(new ItemStack(Material.INK_SAC, 1));
-            chest.update(true);
-        }
-
-        // banner-ish vibe (uses wool as fallback)
-        setBlockSafe(w, x, y + 1, z + 3, mat("LIME_BANNER", Material.LIME_WOOL));
-        return true;
-    }
-
-    private boolean genEmbassyWaystation(Location origin, Random r) {
-        World w = origin.getWorld();
-        if (w == null) return false;
-
-        Location base = findFlatAreaNear(origin, 9, 9, 5);
-        if (base == null) base = origin;
-
-        int x = base.getBlockX();
-        int y = base.getBlockY();
-        int z = base.getBlockZ();
-
-        // Simple fenced camp with signs and a lectern "Parliament" excerpt.
-        Material fence = mat("SPRUCE_FENCE", Material.OAK_FENCE);
-        Material plank = mat("SPRUCE_PLANKS", Material.OAK_PLANKS);
-
-        fillBox(w, x - 4, y, z - 4, x + 4, y, z + 4, Material.GRASS_BLOCK);
-        // floor pad
-        fillBox(w, x - 2, y, z - 2, x + 2, y, z + 2, plank);
-
-        // fence ring
-        for (int dx = -4; dx <= 4; dx++) {
-            setBlockSafe(w, x + dx, y + 1, z - 4, fence);
-            setBlockSafe(w, x + dx, y + 1, z + 4, fence);
-        }
-        for (int dz = -4; dz <= 4; dz++) {
-            setBlockSafe(w, x - 4, y + 1, z + dz, fence);
-            setBlockSafe(w, x + 4, y + 1, z + dz, fence);
-        }
-        // gate opening
-        setBlockSafe(w, x, y + 1, z - 4, Material.AIR);
-
-        // tent-ish canopy
-        Material wool = mat("WHITE_WOOL", Material.WHITE_WOOL);
-        for (int dx = -1; dx <= 1; dx++) {
-            for (int dz = -1; dz <= 1; dz++) {
-                setBlockSafe(w, x + dx, y + 3, z + dz, wool);
-            }
-        }
-        setBlockSafe(w, x, y + 2, z, mat("CHAIN", Material.IRON_BARS));
-        setBlockSafe(w, x, y + 1, z, mat("CAMPFIRE", Material.CAMPFIRE));
-
-        // signs
-        setBlockSafe(w, x - 1, y + 1, z - 3, mat("OAK_SIGN", Material.OAK_SIGN));
-        Block sb = w.getBlockAt(x - 1, y + 1, z - 3);
-        if (sb.getState() instanceof Sign sign) {
-            sign.setLine(0, "Embassy of");
-            sign.setLine(1, "the Viridian");
-            sign.setLine(2, "Empire");
-            sign.setLine(3, "");
-            sign.update(true);
-        }
-
-        setBlockSafe(w, x + 1, y + 1, z - 3, mat("OAK_SIGN", Material.OAK_SIGN));
-        Block sb2 = w.getBlockAt(x + 1, y + 1, z - 3);
-        if (sb2.getState() instanceof Sign sign2) {
-            sign2.setLine(0, "To the");
-            sign2.setLine(1, "Republic");
-            sign2.setLine(2, "of Primoria");
-            sign2.setLine(3, "");
-            sign2.update(true);
-        }
-
-        // lectern with Parliament excerpt
-        setBlockSafe(w, x + 2, y + 1, z + 2, Material.LECTERN);
-        Block lecternBlock = w.getBlockAt(x + 2, y + 1, z + 2);
-        if (lecternBlock.getState() instanceof Lectern lectern) {
-            ItemStack book = makeCustomLoreBook("PARLIAMENT", r);
-            lectern.getInventory().setItem(0, book);
-            lectern.update(true);
-        }
-
-        // small stash
-        if (r.nextInt(100) < 65) {
-            setBlockSafe(w, x - 2, y + 1, z + 2, Material.CHEST);
-            Block cb = w.getBlockAt(x - 2, y + 1, z + 2);
-            if (cb.getState() instanceof Chest chest) {
-                chest.getBlockInventory().clear();
-                chest.getBlockInventory().addItem(makeScrapNote(r, "embassy"));
-                if (r.nextInt(100) < 40) chest.getBlockInventory().addItem(new ItemStack(Material.BREAD, 1 + r.nextInt(2)));
-                if (r.nextInt(100) < 30) chest.getBlockInventory().addItem(new ItemStack(Material.MAP, 1));
-                chest.update(true);
-            }
-        }
-
-        // green marker
-        setBlockSafe(w, x, y + 1, z + 4, mat("LIME_BANNER", Material.LIME_WOOL));
-        return true;
-    }
-
-    private boolean genArmisticeBunker(Location origin, Random r) {
-        World w = origin.getWorld();
-        if (w == null) return false;
-
-        int x = origin.getBlockX();
-        int z = origin.getBlockZ();
-        int surfaceY = w.getHighestBlockYAt(x, z);
-
-        int y = surfaceY - 6;
-        if (y < 12) y = 12;
-
-        Material wall = mat("DEEPSLATE_BRICKS", Material.DEEPSLATE_BRICKS);
-        Material floor = mat("POLISHED_DEEPSLATE", Material.DEEPSLATE);
-        Material door = mat("IRON_DOOR", Material.OAK_DOOR);
-
-        carveRoom(w, x, y, z, 9, 5, 9);
-        frameRoom(w, x, y, z, 9, 5, 9, wall);
-        fillBox(w, x - 4, y, z - 4, x + 4, y, z + 4, floor);
-
-        // ladder shaft to surface (subtle)
-        for (int dy = y + 1; dy <= surfaceY; dy++) {
-            setBlockSafe(w, x + 4, dy, z, Material.LADDER);
-            setBlockSafe(w, x + 4, dy, z + 1, Material.AIR);
-        }
-        setBlockSafe(w, x + 4, surfaceY + 1, z + 1, mat("TRAPDOOR", Material.OAK_TRAPDOOR));
-
-        // interior
-        setBlockSafe(w, x, y + 1, z - 3, mat("IRON_BARS", Material.IRON_BARS));
-        setBlockSafe(w, x, y + 1, z + 3, Material.CHEST);
-        Block cb = w.getBlockAt(x, y + 1, z + 3);
-        if (cb.getState() instanceof Chest chest) {
-            chest.getBlockInventory().clear();
-            chest.getBlockInventory().addItem(makeCustomLoreBook("ARMISTICE", r));
-            chest.getBlockInventory().addItem(makeScrapNote(r, "armistice"));
-            if (r.nextInt(100) < 35) chest.getBlockInventory().addItem(new ItemStack(Material.IRON_INGOT, 1 + r.nextInt(3)));
-            chest.update(true);
-        }
-
-        // banner marker above ground
-        setBlockSafe(w, x, surfaceY + 1, z, mat("LIME_BANNER", Material.LIME_WOOL));
-        return true;
-    }
-
-    private boolean genRivendellCache(Location origin, Random r) {
-        World w = origin.getWorld();
-        if (w == null) return false;
-
-        // Nether: a small basalt/blackstone cache with labeled signs.
-        int x = origin.getBlockX();
-        int y = origin.getBlockY();
-        int z = origin.getBlockZ();
-
-        Material base = mat("BLACKSTONE", Material.NETHER_BRICKS);
-        Material wall = mat("BASALT", Material.NETHERRACK);
-
-        fillBox(w, x - 3, y, z - 3, x + 3, y, z + 3, base);
-        hollowBox(w, x - 3, y + 1, z - 3, 7, 4, 7, wall);
-
-        setBlockSafe(w, x, y + 1, z - 3, Material.AIR);
-        setBlockSafe(w, x, y + 2, z - 3, Material.AIR);
-
-        // signs inside (Supplies / Food / Potions)
-        placeSmallLabelSign(w, x - 1, y + 1, z, "Supplies");
-        placeSmallLabelSign(w, x + 1, y + 1, z, "Food");
-        placeSmallLabelSign(w, x, y + 1, z + 1, "Potions");
-
-        // chest
-        setBlockSafe(w, x, y + 1, z + 2, Material.CHEST);
-        Block cb = w.getBlockAt(x, y + 1, z + 2);
-        if (cb.getState() instanceof Chest chest) {
-            chest.getBlockInventory().clear();
-            chest.getBlockInventory().addItem(makeScrapNote(r, "rivendell"));
-            if (r.nextInt(100) < 60) chest.getBlockInventory().addItem(new ItemStack(Material.GOLD_INGOT, 1 + r.nextInt(3)));
-            if (r.nextInt(100) < 40) chest.getBlockInventory().addItem(new ItemStack(Material.FIRE_CHARGE, 1));
-            chest.update(true);
-        }
-
-        // roof
-        for (int dx = -3; dx <= 3; dx++) {
-            for (int dz = -3; dz <= 3; dz++) {
-                setBlockSafe(w, x + dx, y + 5, z + dz, base);
-            }
-        }
-        return true;
-    }
-
-    private boolean genEndArchiveSpire(Location origin, Random r) {
-        World w = origin.getWorld();
-        if (w == null) return false;
-
-        int x = origin.getBlockX();
-        int y = origin.getBlockY();
-        int z = origin.getBlockZ();
-
-        // Tall end-stone spire with an "archive" chest and a lectern.
-        Material endStone = Material.END_STONE;
-        Material purpur = mat("PURPUR_BLOCK", Material.END_STONE);
-        Material glass = mat("PURPLE_STAINED_GLASS", Material.GLASS);
-
-        // base platform
-        fillBox(w, x - 4, y, z - 4, x + 4, y, z + 4, endStone);
-
-        // spire
-        for (int dy = 1; dy <= 14; dy++) {
-            int radius = (dy < 4) ? 2 : (dy < 10 ? 1 : 0);
-            for (int dx = -radius; dx <= radius; dx++) {
-                for (int dz = -radius; dz <= radius; dz++) {
-                    setBlockSafe(w, x + dx, y + dy, z + dz, purpur);
-                }
-            }
-            if (dy == 8) {
-                setBlockSafe(w, x, y + dy, z + 1, glass);
-                setBlockSafe(w, x, y + dy, z - 1, glass);
-                setBlockSafe(w, x + 1, y + dy, z, glass);
-                setBlockSafe(w, x - 1, y + dy, z, glass);
-            }
-        }
-
-        // top room
-        carveRoom(w, x, y + 15, z, 7, 5, 7);
-        frameRoom(w, x, y + 15, z, 7, 5, 7, purpur);
-
-        setBlockSafe(w, x, y + 16, z, Material.LECTERN);
-        Block lecternBlock = w.getBlockAt(x, y + 16, z);
-        if (lecternBlock.getState() instanceof Lectern lectern) {
-            lectern.getInventory().setItem(0, makeCustomLoreBook("BANNED_PARTIES", r));
-            lectern.update(true);
-        }
-
-        setBlockSafe(w, x + 1, y + 16, z, Material.CHEST);
-        Block cb = w.getBlockAt(x + 1, y + 16, z);
-        if (cb.getState() instanceof Chest chest) {
-            chest.getBlockInventory().clear();
-            chest.getBlockInventory().addItem(makeScrapNote(r, "end_archive"));
-            if (r.nextInt(100) < 55) chest.getBlockInventory().addItem(new ItemStack(Material.CHORUS_FRUIT, 2 + r.nextInt(4)));
-            chest.update(true);
-        }
-
-        return true;
-    }
-
-    private void placeSmallLabelSign(World w, int x, int y, int z, String label) {
-        setBlockSafe(w, x, y, z, mat("OAK_SIGN", Material.OAK_SIGN));
-        Block b = w.getBlockAt(x, y, z);
-        if (b.getState() instanceof Sign sign) {
-            sign.setLine(0, label);
-            sign.setLine(1, "");
-            sign.setLine(2, "");
-            sign.setLine(3, "");
-            sign.update(true);
-        }
-    }
-
-    private ItemStack makeCustomLoreBook(String kind, Random r) {
-        kind = (kind == null) ? "" : kind.toUpperCase(Locale.ROOT);
-
-        List<String> pages = new ArrayList<>();
-        String title = "Wander Notes";
-        String author = "Unknown";
-
-        if (kind.equals("PARLIAMENT")) {
-            title = "Parliament";
-            pages.add("Twenty voices, four watchers.\nObservers speak, but do not vote.\n\nA Bishop can veto.\nA majority can overrule.\n\nThe Emperor votes like anyone else.");
-            pages.add("Six parties are written.\nFive are spoken.\nOne name changes depending on who is listening.\n\nWrite letters.\nDo not speak in the chamber.");
-        } else if (kind.equals("PROP-471A")) {
-            title = "PROP-471A";
-            pages.add("Proposal: correct nothing.\n\nCreate a Bureau.\nLet it describe the government.\n\nDisclaim all responsibility for what it writes.");
-            pages.add("Approved.\nRatified.\n\nErrors remain.\n\nSo the Bureau has work.");
-        } else if (kind.equals("ARMISTICE")) {
-            title = "Armistice";
-            pages.add("Article I:\nSovereignty surrendered.\n\nArticle II:\nA republic renamed.\n\nArticle III:\nA protectorate folded into an empire.");
-            pages.add("Article IV:\nGarrisons permitted.\nInfrastructure controlled.\nPolitics \"assisted\".\nTribute required.");
-            pages.add("Article V–VIII:\nPassage.\nMarkets.\nAid.\nMilitary obligation.\nA defensive force under foreign jurisdiction.");
-        } else if (kind.equals("BANNED_PARTIES")) {
-            title = "Banned Parties";
-            pages.add("Banned. Merged. Defunct.\n\nSome names are crossed out.\nSome are underlined.\n\nOne is circled in glittering ink.");
-            pages.add("If you find the circle, do not read it aloud.\nIf you find the ink, do not touch it.\n\nIf you find the wizard, pretend you didn't.");
-        } else if (kind.equals("ANTHEM")) {
-            title = "Hail to Viridia";
-            pages.add("Hail to Viridia.\nGreen fields and forests grand.\n\nThe tune is old.\nThe words are newer.\n\nSing it underground and it sounds like marching.");
-        } else {
-            pages.add(getRandomFragment(r));
-        }
-
-        ItemStack book = new ItemStack(Material.WRITTEN_BOOK);
-        BookMeta meta = (BookMeta) book.getItemMeta();
-        if (meta != null) {
-            meta.setTitle(title);
-            meta.setAuthor(author);
-            meta.setPages(pages);
-            book.setItemMeta(meta);
-        }
-        return book;
-    }
-
-    private Location findFlatAreaNear(Location origin, int width, int length, int maxYDelta) {
-        World w = origin.getWorld();
-        if (w == null) return null;
-        int ox = origin.getBlockX();
-        int oz = origin.getBlockZ();
-
-        for (int attempt = 0; attempt < 14; attempt++) {
-            int x = ox + (runtimeRandom.nextInt(33) - 16);
-            int z = oz + (runtimeRandom.nextInt(33) - 16);
-            int y = w.getHighestBlockYAt(x, z);
-            if (y <= 1) continue;
-
-            int minY = y, maxY = y;
-            for (int dx = -width / 2; dx <= width / 2; dx++) {
-                for (int dz = -length / 2; dz <= length / 2; dz++) {
-                    int yy = w.getHighestBlockYAt(x + dx, z + dz);
-                    minY = Math.min(minY, yy);
-                    maxY = Math.max(maxY, yy);
-                }
-            }
-            if ((maxY - minY) <= maxYDelta) {
-                return new Location(w, x, y, z);
-            }
-        }
-        return null;
-    }
-
-
-enum StructureType {
+    private enum StructureType {
         // Overworld
         RUINED_COTTAGE,
         STONE_CIRCLE,
@@ -3650,20 +3109,15 @@ enum StructureType {
         RUINED_WATCHTOWER,
         BURIED_CRYPT,
         LOST_LIBRARY,
-        IMPERIAL_BUREAU_OUTPOST,
-        EMBASSY_WAYSTATION,
-        ARMISTICE_BUNKER,
 
         // Nether
         NETHER_SIGNAL_PYLON,
         BASALT_ALTAR,
         FORGOTTEN_HALL,
-        RIVENDELL_CACHE,
 
         // End
         ENDER_OBELISK,
         VOID_RUIN,
-        CHORUS_MAZE,
-        END_ARCHIVE_SPIRE
+        CHORUS_MAZE
     }
 }

@@ -234,9 +234,6 @@ private BukkitTask approxServerTickTask = null;
 
     private boolean enabled = true;
 
-
-    // World allowlist (empty = allow all)
-    private List<String> allowedWorlds = new ArrayList<>(Arrays.asList("world", "tedkraft_world"));
     // Dimension restrictions
     private boolean allowSpawningInNether = false;
     private boolean allowSpawningInEnd = false;
@@ -2674,13 +2671,6 @@ if (target != null) {
 
             enabled = getConfig().getBoolean("enabled", enabled);
 
-
-            List<String> cfgAllowedWorlds = getConfig().getStringList("worlds.allowed");
-            if (cfgAllowedWorlds != null && !cfgAllowedWorlds.isEmpty()) {
-                allowedWorlds = new ArrayList<>(cfgAllowedWorlds);
-            } else {
-                allowedWorlds = new ArrayList<>(Arrays.asList("world", "tedkraft_world"));
-            }
             allowSpawningInNether = getConfig().getBoolean("dimensions.allowNether", allowSpawningInNether);
             allowSpawningInEnd = getConfig().getBoolean("dimensions.allowEnd", allowSpawningInEnd);
 

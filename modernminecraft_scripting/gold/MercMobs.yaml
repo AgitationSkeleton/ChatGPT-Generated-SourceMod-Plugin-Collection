@@ -1,0 +1,11 @@
+name: MercMobs
+main: com.redchanit.mercmobs.MercMobs
+version: 1.0
+api-version: 1.21
+depend: [Citizens]
+softdepend: [dynmap]
+description: Citizens-based Mercenary NPC mobs with taming, factions, and special variants.
+commands:
+  mercs:
+    description: Command your tamed mercs (stop/follow/patrol), debug spawn, or manage MercMobs.
+    usage: /<command> <stop|follow|patrol|share|unshare|spawn|reload|status>
