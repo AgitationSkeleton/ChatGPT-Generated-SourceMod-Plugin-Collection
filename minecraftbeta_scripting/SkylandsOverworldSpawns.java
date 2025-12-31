@@ -5,6 +5,9 @@
 //   hostiles/passives based on light + ground.
 // - Periodically spawns hostiles around players in Skylands wherever it is
 //   dark enough (light level <= 7), ignoring world time.
+// - Adds a 5% chance that any spawned ZOMBIE becomes a GIANT instead.
+// - Adds a ~1% chance that any spawned SPIDER becomes a spider jockey
+//   (skeleton riding the spider), similar to vanilla.
 
 import java.util.List;
 import java.util.Random;
@@ -30,6 +33,12 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
 
     // Set this to true if you want console spam about hostile spawns.
     private static final boolean DEBUG_SPAWNS = true;
+
+    // 5% chance for a zombie to become a giant
+    private static final int GIANT_CHANCE_PERCENT = 5;
+
+    // Vanilla spider jockey chance is ~1% of spiders
+    private static final int JOCKEY_CHANCE_PERCENT = 1;
 
     @Override
     public void onEnable() {
@@ -134,6 +143,15 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
 
         if (shouldBeHostile) {
             replacementType = chooseRandomHostile();
+            replacementType = applyGiantChance(replacementType);
+
+            // If we rolled a GIANT, ensure there is enough space (12 blocks tall, 3x3 footprint)
+            // so it doesn't spawn inside ceilings and suffocate.
+            if (replacementType == CreatureType.GIANT) {
+                if (!hasGiantSpace(world, spawnLocation.getBlockX(), spawnLocation.getBlockY(), spawnLocation.getBlockZ())) {
+                    replacementType = CreatureType.ZOMBIE;
+                }
+            }
         } else {
             replacementType = chooseRandomPassive();
         }
@@ -148,7 +166,10 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
         event.setCancelled(true);
 
         try {
-            world.spawnCreature(spawnLocation, replacementType);
+            Entity spawned = world.spawnCreature(spawnLocation, replacementType);
+            if (spawned != null && replacementType == CreatureType.SPIDER) {
+                maybeMakeSpiderJockey(spawned);
+            }
         } catch (Throwable t) {
             // Fail-safe: don't crash the server if something goes wrong.
             System.out.println("[SkylandsOverworldSpawns] Failed to spawn "
@@ -221,6 +242,52 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
         }
     }
 
+    /**
+     * 5% chance that any ZOMBIE becomes a GIANT instead.
+     */
+    private CreatureType applyGiantChance(CreatureType type) {
+        if (type == CreatureType.ZOMBIE) {
+            if (random.nextInt(100) < GIANT_CHANCE_PERCENT) {
+                return CreatureType.GIANT;
+            }
+        }
+        return type;
+    }
+
+    /**
+     * Roughly vanilla-like spider jockey chance:
+     * - ~1% of spiders get a skeleton rider.
+     */
+    private void maybeMakeSpiderJockey(Entity spiderEntity) {
+        if (spiderEntity == null) {
+            return;
+        }
+
+        if (random.nextInt(100) >= JOCKEY_CHANCE_PERCENT) {
+            return;
+        }
+
+        World world = spiderEntity.getWorld();
+        if (world == null) {
+            return;
+        }
+
+        Location loc = spiderEntity.getLocation();
+        try {
+            Entity skeleton = world.spawnCreature(loc, CreatureType.SKELETON);
+            if (skeleton != null) {
+                spiderEntity.setPassenger(skeleton);
+                if (DEBUG_SPAWNS) {
+                    System.out.println("[SkylandsOverworldSpawns] Created spider jockey at "
+                            + formatLocation(loc));
+                }
+            }
+        } catch (Throwable t) {
+            System.out.println("[SkylandsOverworldSpawns] Failed to create spider jockey at "
+                    + formatLocation(loc) + ": " + t.getMessage());
+        }
+    }
+
     // ------------------------------------------------------------------------
     //  2) Periodic hostile spawns in dark areas around players (time-independent)
     // ------------------------------------------------------------------------
@@ -269,12 +336,26 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
         }
 
         CreatureType type = chooseRandomHostile();
+        type = applyGiantChance(type);
+
+        // If we rolled a GIANT, ensure there is enough space (12 blocks tall, 3x3 footprint)
+        // so it doesn't spawn inside ceilings and suffocate.
+        if (type == CreatureType.GIANT) {
+            if (!hasGiantSpace(world, spawnLoc.getBlockX(), spawnLoc.getBlockY(), spawnLoc.getBlockZ())) {
+                type = CreatureType.ZOMBIE;
+            }
+        }
 
         try {
             Entity spawned = world.spawnCreature(spawnLoc, type);
-            if (spawned != null && DEBUG_SPAWNS) {
-                System.out.println("[SkylandsOverworldSpawns] Spawned " + type +
-                        " at " + formatLocation(spawnLoc));
+            if (spawned != null) {
+                if (type == CreatureType.SPIDER) {
+                    maybeMakeSpiderJockey(spawned);
+                }
+                if (DEBUG_SPAWNS) {
+                    System.out.println("[SkylandsOverworldSpawns] Spawned " + type +
+                            " at " + formatLocation(spawnLoc));
+                }
             }
         } catch (Throwable t) {
             System.out.println("[SkylandsOverworldSpawns] Failed to spawn hostile "
@@ -364,5 +445,25 @@ public class SkylandsOverworldSpawns extends JavaPlugin implements Listener {
         World world = loc.getWorld();
         String worldName = (world != null) ? world.getName() : "(nullWorld)";
         return worldName + "@" + loc.getBlockX() + "," + loc.getBlockY() + "," + loc.getBlockZ();
+    }
+
+    private boolean hasGiantSpace(World world, int baseX, int baseY, int baseZ) {
+        // Require 12 blocks of vertical clearance and a 3x3 footprint (matches ZombieGiants)
+        int requiredHeight = 12;
+
+        for (int yOffset = 0; yOffset < requiredHeight; yOffset++) {
+            int y = baseY + yOffset;
+
+            for (int xOffset = -1; xOffset <= 1; xOffset++) {
+                for (int zOffset = -1; zOffset <= 1; zOffset++) {
+                    int typeId = world.getBlockTypeIdAt(baseX + xOffset, y, baseZ + zOffset);
+                    if (typeId != 0) { // 0 == air in Beta
+                        return false;
+                    }
+                }
+            }
+        }
+
+        return true;
     }
 }

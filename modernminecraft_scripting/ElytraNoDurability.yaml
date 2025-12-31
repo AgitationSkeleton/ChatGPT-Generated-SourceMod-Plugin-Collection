@@ -1,0 +1,6 @@
+name: ElytraNoDurability
+main: ElytraNoDurability
+version: 1.0.0
+api-version: "1.21"
+author: ChatGPT
+description: Prevents elytras from losing durability.

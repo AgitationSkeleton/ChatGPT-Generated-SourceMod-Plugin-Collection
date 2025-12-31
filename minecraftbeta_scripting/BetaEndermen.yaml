@@ -1,0 +1,9 @@
+name: BetaEndermen
+main: com.redchanit.betaendermen.BetaEndermen
+version: 1.1
+description: Enderman-like fake-player NPCs (MHF_Enderman) for Beta 1.7.3 Poseidon.
+author: ChatGPT
+commands:
+  betaendermen:
+    description: Spawn or reload BetaEndermen.
+    usage: /<command> spawn [count] | /<command> reload

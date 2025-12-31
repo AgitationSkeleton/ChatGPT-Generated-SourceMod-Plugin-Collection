@@ -1,0 +1,14 @@
+# MapFix.yaml
+name: MapFix
+main: MapFix
+version: 1.0.0
+api-version: 1.21
+author: ChatGPT
+commands:
+  mapfix:
+    description: Batch reassign the World associated with filled maps from a source world's map_#.dat set to a target world.
+    usage: /mapfix <targetWorld> [sourceWorld]
+permissions:
+  mapfix.use:
+    description: Allows use of /mapfix
+    default: op
