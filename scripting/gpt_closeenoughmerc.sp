@@ -709,4 +709,6 @@ public void OnMapStart()
 {
     DL_AddMercArmModels();
     DL_AddAllMercSounds();
+	
+    PrecacheAll(); // <-- this is the missing piece
 }
