@@ -41,6 +41,9 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.bukkit.configuration.file.FileConfiguration;
+import org.bukkit.configuration.file.YamlConfiguration;
+
 /**
  * ViridianTownsFolk (RESET baseline, crash-safe)
  *
@@ -98,6 +101,10 @@ public final class ViridianTownsFolk extends JavaPlugin implements Listener, Com
     private NamespacedKey KEY_VTF_EXPECT_IDLE; // flag set when a target was chosen and we want to linger on arrival
 
     private static final String SCORE_TAG = "vtf_managed";
+	
+	// Worlds allowlist (config: worlds.allowed)
+	private List<String> allowedWorlds = new ArrayList<>(Arrays.asList("world", "tedkraft_world"));
+
 
 
 /* ============================================================
@@ -156,6 +163,13 @@ private NamespacedKey KEY_VTF_SKIN; // stores chosen skinKey on entity PDC
 private long approxServerTick = 0L;
 private BukkitTask approxServerTickTask = null;
 
+
+    /* ============================================================
+     *  Dialogue (modular translation file)
+     * ============================================================ */
+
+    private File dialogueFile;
+    private final Map<String, List<String>> dialogueLists = new HashMap<>();
 
     /* ============================================================
      *  Legacy/adoption heuristics and exclusions
@@ -234,9 +248,6 @@ private BukkitTask approxServerTickTask = null;
 
     private boolean enabled = true;
 
-
-    // World allowlist (empty = allow all)
-    private List<String> allowedWorlds = new ArrayList<>(Arrays.asList("world", "tedkraft_world"));
     // Dimension restrictions
     private boolean allowSpawningInNether = false;
     private boolean allowSpawningInEnd = false;
@@ -309,6 +320,8 @@ private BukkitTask approxServerTickTask = null;
         ensureConfigFile();
         loadConfigValues();
 
+        ensureDialogueFile();
+        loadDialogueFromFile(true);
 
 ensureSkinFolder();
 loadSkinCacheFromConfig();
@@ -416,6 +429,7 @@ startSkinTasks();
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadsites  - reload sites from markers.yml + sites.txt");
             sender.sendMessage(ChatColor.GRAY + "/vtf reloadconfig - reload config.yml");
             sender.sendMessage(ChatColor.GRAY + "/vtf migrate      - rename/update spawned VTF NPCs (back-compat)");
+            sender.sendMessage(ChatColor.GRAY + "/vtf refreshdialogue - reload dialogue.yml");
             return true;
         }
 
@@ -488,10 +502,299 @@ startSkinTasks();
                 sender.sendMessage(ChatColor.GREEN + "Migrated/updated spawned VTF NPCs: " + updated);
                 return true;
             }
+            case "refreshdialogue": {
+                ensureDialogueFile();
+                boolean ok = loadDialogueFromFile(false);
+                if (ok) sender.sendMessage(ChatColor.GREEN + "Reloaded dialogue.yml (" + dialogueLists.size() + " lists).");
+                else sender.sendMessage(ChatColor.RED + "Failed to reload dialogue.yml. Check console.");
+                return true;
+            }
             default:
                 sender.sendMessage(ChatColor.RED + "Unknown subcommand. Try /vtf");
                 return true;
         }
+    }
+
+    /* ============================================================
+     *  Dialogue file handling
+     * ============================================================ */
+
+    private void ensureDialogueFile() {
+        try {
+            if (!getDataFolder().exists()) getDataFolder().mkdirs();
+            dialogueFile = new File(getDataFolder(), "dialogue.yml");
+            if (dialogueFile.exists()) return;
+
+            String defaults =
+                    "version: 1\n" +
+                    "\n" +
+                    "prompts:\n" +
+                    "  root: \"(Reply with: rumors, directions, work, empire, or bye)\"\n" +
+                    "  afterDirections: \"(Ask about: rumors, work, empire, or bye)\"\n" +
+                    "  afterRumors: \"(Ask about: directions, work, empire, or bye)\"\n" +
+                    "  afterWorkOffer: \"(Say: yes, no, or ask about rumors/directions)\"\n" +
+                    "  afterEmpire: \"(Ask about: rumors, directions, work, or bye)\"\n" +
+                    "  afterAcceptWork: \"(Ask about: rumors, directions, empire, or bye)\"\n" +
+                    "  afterDeclineWork: \"(Ask about: rumors, directions, empire, or bye)\"\n" +
+                    "  afterFallback: \"(Try: rumors, directions, work, empire, or bye)\"\n" +
+                    "\n" +
+                    "smalltalk:\n" +
+                    "  day:\n" +
+                    "    base:\n" +
+                    "      - \"Roads are safer than the woods.\"\n" +
+                    "      - \"If you’re lost, you’re not the first.\"\n" +
+                    "      - \"Some places aren’t on the signposts.\"\n" +
+                    "    roleAdditions:\n" +
+                    "      guard:\n" +
+                    "        - \"No trouble today.\"\n" +
+                    "      worker:\n" +
+                    "        - \"Hands are busy. Speak quick.\"\n" +
+                    "      priest:\n" +
+                    "        - \"Prayers don’t stop everything. Just the worst of it.\"\n" +
+                    "      scholar:\n" +
+                    "        - \"History repeats. Names change. The shape stays.\"\n" +
+                    "  night:\n" +
+                    "    base:\n" +
+                    "      - \"Keep your voice down. The dark carries.\"\n" +
+                    "      - \"Out late, are we?\"\n" +
+                    "      - \"Stay near the light.\"\n" +
+                    "    roleAdditions:\n" +
+                    "      guard:\n" +
+                    "        - \"No trouble today.\"\n" +
+                    "      worker:\n" +
+                    "        - \"Hands are busy. Speak quick.\"\n" +
+                    "      priest:\n" +
+                    "        - \"Prayers don’t stop everything. Just the worst of it.\"\n" +
+                    "      scholar:\n" +
+                    "        - \"History repeats. Names change. The shape stays.\"\n" +
+                    "\n" +
+                    "farewell:\n" +
+                    "  base:\n" +
+                    "    - \"Stay safe out there.\"\n" +
+                    "    - \"Mind the roads.\"\n" +
+                    "    - \"Until we meet again.\"\n" +
+                    "  byRole:\n" +
+                    "    guard:\n" +
+                    "      - \"Move along.\"\n" +
+                    "      - \"Keep your head down.\"\n" +
+                    "      - \"No trouble, understood?\"\n" +
+                    "    worker:\n" +
+                    "      - \"Back to it, then.\"\n" +
+                    "      - \"Work waits for no one.\"\n" +
+                    "    priest:\n" +
+                    "      - \"May order keep you.\"\n" +
+                    "      - \"Walk in the light.\"\n" +
+                    "    scholar:\n" +
+                    "      - \"Come back with questions.\"\n" +
+                    "      - \"Knowledge favors the curious.\"\n" +
+                    "    dockhand:\n" +
+                    "      - \"Tide’s turning. I’ve work.\"\n" +
+                    "      - \"Watch your step on the boards.\"\n" +
+                    "    ranger:\n" +
+                    "      - \"Don’t stray from the paths.\"\n" +
+                    "      - \"The woods listen.\"\n" +
+                    "    hermit:\n" +
+                    "      - \"Leave me to my quiet.\"\n" +
+                    "      - \"Go. Before the wind changes.\"\n" +
+                    "\n" +
+                    "opener:\n" +
+                    "  townsfolk:\n" +
+                    "    - \"You look like you’ve got a question. Ask.\"\n" +
+                    "  guard:\n" +
+                    "    - \"Keep the peace and mind your hands. The watch answers for {place}.\"\n" +
+                    "  priest:\n" +
+                    "    - \"Peace upon you. The lectern at {place} never lacks a seeker.\"\n" +
+                    "  scholar:\n" +
+                    "    - \"If you have questions, speak plain. Records from {place} are... incomplete.\"\n" +
+                    "  dockhand:\n" +
+                    "    - \"Winds shift fast near {place}. Don’t linger by the water at night.\"\n" +
+                    "  worker:\n" +
+                    "    default:\n" +
+                    "      - \"Work is work. Speak quick.\"\n" +
+                    "    farmer:\n" +
+                    "      - \"Fields don't tend themselves. {place} eats what we grow.\"\n" +
+                    "    smith:\n" +
+                    "      - \"Iron is honest if you treat it right. {place} needs nails and blades.\"\n" +
+                    "    mason:\n" +
+                    "      - \"Stone remembers. {place} is built on careful cuts.\"\n" +
+                    "    carpenter:\n" +
+                    "      - \"Wood is kinder than stone. {place} still creaks in the wind.\"\n" +
+                    "  ranger:\n" +
+                    "    - \"Trail’s thin beyond {place}. Keep to paths if you value daylight.\"\n" +
+                    "  hermit:\n" +
+                    "    - \"I keep my counsel. But you’ve walked far, and that counts for something.\"\n" +
+                    "\n" +
+                    "rumor:\n" +
+                    "  base:\n" +
+                    "    - \"They say old tunnels under {place} still breathe at night.\"\n" +
+                    "    - \"A wagon went missing on the road to {place}. No tracks, just... silence.\"\n" +
+                    "    - \"Someone keeps lighting candles where no shrine stands. Near {place}.\"\n" +
+                    "  byRoleAdditions:\n" +
+                    "    guard:\n" +
+                    "      - \"If you hear bells with no hands to pull them, leave the street.\"\n" +
+                    "    priest:\n" +
+                    "      - \"Prayer helps, but locks help more. Keep both.\"\n" +
+                    "    scholar:\n" +
+                    "      - \"There are pages torn from the register. Not burned. Taken.\"\n" +
+                    "\n" +
+                    "directions:\n" +
+                    "  ranger:\n" +
+                    "    - \"Follow the worn ground and keep the sun on your shoulder. {to} lies where the paths thicken.\"\n" +
+                    "  default:\n" +
+                    "    - \"If you can see a marker for {to}, you’re already close. Keep to the travelled ground.\"\n" +
+                    "\n" +
+                    "work:\n" +
+                    "  guard:\n" +
+                    "    - \"Keep your eyes open near {place}. If you see trouble, shout before you swing.\"\n" +
+                    "  priest:\n" +
+                    "    - \"Bring candles or books to the lectern at {place}. Order matters.\"\n" +
+                    "  scholar:\n" +
+                    "    - \"If you find odd carvings or fragments, report them. Names and dates, not stories.\"\n" +
+                    "  worker:\n" +
+                    "    default:\n" +
+                    "      - \"Haul what you can and don’t break what you can’t replace.\"\n" +
+                    "    farmer:\n" +
+                    "      - \"If crops are ripe, harvest and leave seed behind. We replant what we take.\"\n" +
+                    "    smith:\n" +
+                    "      - \"Coal and iron. That’s all a forge asks. Bring what you find.\"\n" +
+                    "    mason:\n" +
+                    "      - \"Clear rubble and keep stone stacked. {place} is always settling.\"\n" +
+                    "    carpenter:\n" +
+                    "      - \"Planks, fences, hinges. Keep doors standing.\"\n" +
+                    "  townsfolk:\n" +
+                    "    - \"Help where you can. {place} remembers who does.\"\n" +
+                    "\n" +
+                    "acceptWork:\n" +
+                    "  guard:\n" +
+                    "    - \"Good. Keep your blade down until it’s needed.\"\n" +
+                    "  priest:\n" +
+                    "    - \"Then go with steadiness. Speak with respect and listen twice.\"\n" +
+                    "  scholar:\n" +
+                    "    - \"Bring facts. I can’t use fear.\"\n" +
+                    "  worker:\n" +
+                    "    default:\n" +
+                    "      - \"Keep your hands busy and your eyes open.\"\n" +
+                    "    farmer:\n" +
+                    "      - \"Harvest clean. Replant what you cut. Store what you spare.\"\n" +
+                    "  townsfolk:\n" +
+                    "    - \"Fair enough. Walk safe.\"\n" +
+                    "\n" +
+                    "declineWork:\n" +
+                    "  guard:\n" +
+                    "    - \"Then don’t make my job harder.\"\n" +
+                    "  priest:\n" +
+                    "    - \"No shame in caution. Just don’t mock what you don’t understand.\"\n" +
+                    "  default:\n" +
+                    "    - \"Suit yourself.\"\n" +
+                    "\n" +
+                    "empire:\n" +
+                    "  base:\n" +
+                    "    - \"Viridia holds because law holds. Chaos is easy. Order is built.\"\n" +
+                    "    - \"The Empire isn’t just banners. It’s roads, ledgers, and the promise that someone answers for harm.\"\n" +
+                    "    - \"We’re not perfect. But we’re still here, and that counts.\"\n" +
+                    "  byRoleAdditions:\n" +
+                    "    guard:\n" +
+                    "      - \"If you break the peace, you answer. Simple as that.\"\n" +
+                    "    priest:\n" +
+                    "      - \"Belief without duty is noise. Duty without belief is rot.\"\n" +
+                    "    scholar:\n" +
+                    "      - \"Empires fall when they forget their records. That’s why I write.\"\n" +
+                    "\n" +
+                    "fallback:\n" +
+                    "  hermit:\n" +
+                    "    - \"Words are cheap. Leave me.\"\n" +
+                    "  guard:\n" +
+                    "    - \"I don’t have time for riddles. Speak plain.\"\n" +
+                    "  default:\n" +
+                    "    - \"I’m not sure what you mean. Try asking for rumors, directions, work, or the Empire.\"\n";
+
+            try (FileOutputStream fos = new FileOutputStream(dialogueFile, false)) {
+                fos.write(defaults.getBytes(StandardCharsets.UTF_8));
+            }
+        } catch (Throwable t) {
+            getLogger().warning("Failed to ensure dialogue.yml: " + t.getMessage());
+        }
+    }
+
+    private boolean loadDialogueFromFile(boolean log) {
+        try {
+            if (dialogueFile == null) dialogueFile = new File(getDataFolder(), "dialogue.yml");
+            if (!dialogueFile.exists()) return false;
+
+            FileConfiguration yc = YamlConfiguration.loadConfiguration(dialogueFile);
+
+            Map<String, List<String>> loaded = new HashMap<>();
+            Set<String> keys = yc.getKeys(true);
+            for (String key : keys) {
+                if (key == null) continue;
+                try {
+                    if (!yc.isList(key)) continue;
+                    List<?> raw = yc.getList(key);
+                    if (raw == null) continue;
+                    List<String> out = new ArrayList<>();
+                    for (Object o : raw) {
+                        if (o == null) continue;
+                        String s = String.valueOf(o);
+                        if (s == null) continue;
+                        s = s.trim();
+                        if (!s.isEmpty()) out.add(s);
+                    }
+                    if (!out.isEmpty()) loaded.put(key, out);
+                } catch (Throwable ignored) {}
+            }
+
+            synchronized (dialogueLists) {
+                dialogueLists.clear();
+                dialogueLists.putAll(loaded);
+            }
+
+            if (log) getLogger().info("Dialogue loaded: lists=" + dialogueLists.size() + " from " + dialogueFile.getName());
+            return true;
+        } catch (Throwable t) {
+            getLogger().warning("Failed loading dialogue.yml: " + t.getMessage());
+            return false;
+        }
+    }
+
+    private List<String> dlgList(String key) {
+        if (key == null) return Collections.emptyList();
+        synchronized (dialogueLists) {
+            List<String> v = dialogueLists.get(key);
+            if (v == null) return Collections.emptyList();
+            return v;
+        }
+    }
+
+    private String dlgPick(String key, String fallback) {
+        List<String> list = dlgList(key);
+        if (list.isEmpty()) return fallback;
+        return list.get(ThreadLocalRandom.current().nextInt(list.size()));
+    }
+
+    private String dlgPickFromKeys(List<String> keys, String fallback) {
+        List<String> pool = new ArrayList<>();
+        for (String k : keys) {
+            if (k == null) continue;
+            List<String> v = dlgList(k);
+            if (v != null && !v.isEmpty()) pool.addAll(v);
+        }
+        if (pool.isEmpty()) return fallback;
+        return pool.get(ThreadLocalRandom.current().nextInt(pool.size()));
+    }
+
+    private String applyVars(String template, Map<String, String> vars) {
+        if (template == null) return "";
+        String out = template;
+        if (vars != null) {
+            for (Map.Entry<String, String> e : vars.entrySet()) {
+                String k = e.getKey();
+                String v = e.getValue();
+                if (k == null) continue;
+                if (v == null) v = "";
+                out = out.replace("{" + k + "}", v);
+            }
+        }
+        return out;
     }
 
     /* ============================================================
@@ -660,57 +963,21 @@ startSkinTasks();
         }
 
         String role = getRole(ent);
-        List<String> lines = new ArrayList<>();
 
-        if (night) {
-            lines.add("Keep your voice down. The dark carries.");
-            lines.add("Out late, are we?");
-            lines.add("Stay near the light.");
-        } else {
-            lines.add("Roads are safer than the woods.");
-            lines.add("If you’re lost, you’re not the first.");
-            lines.add("Some places aren’t on the signposts.");
-        }
+        String dayOrNight = night ? "night" : "day";
+        List<String> keys = new ArrayList<>();
+        keys.add("smalltalk." + dayOrNight + ".base");
+        keys.add("smalltalk." + dayOrNight + ".roleAdditions." + role);
 
-        if ("guard".equals(role)) lines.add("No trouble today.");
-        if ("worker".equals(role)) lines.add("Hands are busy. Speak quick.");
-        if ("priest".equals(role)) lines.add("Prayers don’t stop everything. Just the worst of it.");
-        if ("scholar".equals(role)) lines.add("History repeats. Names change. The shape stays.");
-
-        return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
+        return dlgPickFromKeys(keys, "...");
     }
 
     String pickFarewell(String role) {
-        List<String> lines = new ArrayList<>();
-        lines.add("Stay safe out there.");
-        lines.add("Mind the roads.");
-        lines.add("Until we meet again.");
+        List<String> keys = new ArrayList<>();
+        keys.add("farewell.base");
+        keys.add("farewell.byRole." + role);
 
-        if ("guard".equals(role)) {
-            lines.add("Move along.");
-            lines.add("Keep your head down.");
-            lines.add("No trouble, understood?");
-        } else if ("worker".equals(role)) {
-            lines.add("Back to it, then.");
-            lines.add("Work waits for no one.");
-        } else if ("priest".equals(role)) {
-            lines.add("May order keep you.");
-            lines.add("Walk in the light.");
-        } else if ("scholar".equals(role)) {
-            lines.add("Come back with questions.");
-            lines.add("Knowledge favors the curious.");
-        } else if ("dockhand".equals(role)) {
-            lines.add("Tide’s turning. I’ve work.");
-            lines.add("Watch your step on the boards.");
-        } else if ("ranger".equals(role)) {
-            lines.add("Don’t stray from the paths.");
-            lines.add("The woods listen.");
-        } else if ("hermit".equals(role)) {
-            lines.add("Leave me to my quiet.");
-            lines.add("Go. Before the wind changes.");
-        }
-
-        return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
+        return dlgPickFromKeys(keys, "Until we meet again.");
     }
 
 
@@ -857,7 +1124,7 @@ startSkinTasks();
 
         String opener = buildOpenerLine(role, subrole, originName, nearName);
         player.sendMessage(ChatColor.GRAY + who + ": " + opener);
-        player.sendMessage(ChatColor.DARK_GRAY + "(Reply with: rumors, directions, work, empire, or bye)");
+        player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.root", "(Reply with: rumors, directions, work, empire, or bye)"));
 
         long exp = System.currentTimeMillis() + (long) dialogueSessionSeconds * 1000L;
         ConversationSession sess = new ConversationSession(npc.getId(), "root", 0, exp);
@@ -901,19 +1168,19 @@ startSkinTasks();
 
         if (containsAny(msg, "directions", "where", "how do", "map", "road", "route")) {
             player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + directionsLine(role, originName, nearName));
-            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, work, empire, or bye)");
+            player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterDirections", "(Ask about: rumors, work, empire, or bye)"));
             return;
         }
 
         if (containsAny(msg, "rumor", "rumors", "gossip", "hear", "news")) {
             player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + rumorLine(role, originName, nearName));
-            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: directions, work, empire, or bye)");
+            player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterRumors", "(Ask about: directions, work, empire, or bye)"));
             return;
         }
 
         if (containsAny(msg, "work", "job", "help", "task", "hire")) {
             player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + workLine(role, subrole, originName, nearName));
-            player.sendMessage(ChatColor.DARK_GRAY + "(Say: yes, no, or ask about rumors/directions)");
+            player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterWorkOffer", "(Say: yes, no, or ask about rumors/directions)"));
             session.topic = "work";
             session.step = 1;
             return;
@@ -924,26 +1191,26 @@ startSkinTasks();
                 player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + acceptWorkLine(role, subrole, originName, nearName));
                 session.topic = "root";
                 session.step = 0;
-                player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, empire, or bye)");
+                player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterAcceptWork", "(Ask about: rumors, directions, empire, or bye)"));
                 return;
             }
             if (containsAny(msg, "no", "nah", "nope")) {
                 player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + declineWorkLine(role));
                 session.topic = "root";
                 session.step = 0;
-                player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, empire, or bye)");
+                player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterDeclineWork", "(Ask about: rumors, directions, empire, or bye)"));
                 return;
             }
         }
 
         if (containsAny(msg, "empire", "viridia", "law", "order", "king", "queen", "emperor", "tax")) {
             player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + empireLine(role, originName, nearName));
-            player.sendMessage(ChatColor.DARK_GRAY + "(Ask about: rumors, directions, work, or bye)");
+            player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterEmpire", "(Ask about: rumors, directions, work, or bye)"));
             return;
         }
 
         player.sendMessage(ChatColor.GRAY + npc.getName() + ": " + fallbackLine(role));
-        player.sendMessage(ChatColor.DARK_GRAY + "(Try: rumors, directions, work, empire, or bye)");
+        player.sendMessage(ChatColor.DARK_GRAY + dlgPick("prompts.afterFallback", "(Try: rumors, directions, work, empire, or bye)"));
     }
 
     private boolean containsAny(String msg, String... needles) {
@@ -959,102 +1226,112 @@ startSkinTasks();
         boolean mentionOrigin = ThreadLocalRandom.current().nextDouble() < 0.70;
         String place = mentionOrigin ? originName : nearName;
 
-        if ("guard".equals(role)) {
-            return "Keep the peace and mind your hands. The watch answers for " + place + ".";
-        }
-        if ("priest".equals(role)) {
-            return "Peace upon you. The lectern at " + place + " never lacks a seeker.";
-        }
-        if ("scholar".equals(role)) {
-            return "If you have questions, speak plain. Records from " + place + " are... incomplete.";
-        }
-        if ("dockhand".equals(role)) {
-            return "Winds shift fast near " + place + ". Don’t linger by the water at night.";
-        }
+        Map<String, String> vars = new HashMap<>();
+        vars.put("place", place);
+
         if ("worker".equals(role)) {
-            if ("farmer".equalsIgnoreCase(subrole)) return "Fields don't tend themselves. " + place + " eats what we grow.";
-            if ("smith".equalsIgnoreCase(subrole)) return "Iron is honest if you treat it right. " + place + " needs nails and blades.";
-            if ("mason".equalsIgnoreCase(subrole)) return "Stone remembers. " + place + " is built on careful cuts.";
-            if ("carpenter".equalsIgnoreCase(subrole)) return "Wood is kinder than stone. " + place + " still creaks in the wind.";
-            return "Work is work. Speak quick.";
+            String sr = (subrole == null) ? "" : subrole.trim().toLowerCase(Locale.ROOT);
+            List<String> keys = new ArrayList<>();
+            if (!sr.isEmpty()) keys.add("opener.worker." + sr);
+            keys.add("opener.worker.default");
+            String picked = dlgPickFromKeys(keys, "Work is work. Speak quick.");
+            return applyVars(picked, vars);
         }
 
-        if ("ranger".equals(role)) {
-            return "Trail’s thin beyond " + place + ". Keep to paths if you value daylight.";
-        }
-        if ("hermit".equals(role)) {
-            return "I keep my counsel. But you’ve walked far, and that counts for something.";
-        }
-        return "You look like you’ve got a question. Ask.";
+        String key = "opener." + role;
+        String picked = dlgPick(key, null);
+        if (picked != null) return applyVars(picked, vars);
+
+        String fallback = dlgPick("opener.townsfolk", "You look like you’ve got a question. Ask.");
+        return applyVars(fallback, vars);
     }
 
     private String rumorLine(String role, String originName, String nearName) {
         String place = (ThreadLocalRandom.current().nextDouble() < 0.55) ? nearName : originName;
-        List<String> r = new ArrayList<>();
-        r.add("They say old tunnels under " + place + " still breathe at night.");
-        r.add("A wagon went missing on the road to " + place + ". No tracks, just... silence.");
-        r.add("Someone keeps lighting candles where no shrine stands. Near " + place + ".");
-        if ("guard".equals(role)) r.add("If you hear bells with no hands to pull them, leave the street.");
-        if ("priest".equals(role)) r.add("Prayer helps, but locks help more. Keep both.");
-        if ("scholar".equals(role)) r.add("There are pages torn from the register. Not burned. Taken.");
-        return r.get(ThreadLocalRandom.current().nextInt(r.size()));
+
+        Map<String, String> vars = new HashMap<>();
+        vars.put("place", place);
+
+        List<String> keys = new ArrayList<>();
+        keys.add("rumor.base");
+        keys.add("rumor.byRoleAdditions." + role);
+
+        String picked = dlgPickFromKeys(keys, "...");
+        return applyVars(picked, vars);
     }
 
     private String directionsLine(String role, String originName, String nearName) {
         String to = (ThreadLocalRandom.current().nextDouble() < 0.50) ? nearName : originName;
+
+        Map<String, String> vars = new HashMap<>();
+        vars.put("to", to);
+
         if ("ranger".equals(role)) {
-            return "Follow the worn ground and keep the sun on your shoulder. " + to + " lies where the paths thicken.";
+            String picked = dlgPick("directions.ranger", "Follow the worn ground and keep the sun on your shoulder. {to} lies where the paths thicken.");
+            return applyVars(picked, vars);
         }
-        return "If you can see a marker for " + to + ", you’re already close. Keep to the travelled ground.";
+
+        String picked = dlgPick("directions.default", "If you can see a marker for {to}, you’re already close. Keep to the travelled ground.");
+        return applyVars(picked, vars);
     }
 
     private String workLine(String role, String subrole, String originName, String nearName) {
         String place = (ThreadLocalRandom.current().nextDouble() < 0.55) ? nearName : originName;
-        if ("guard".equals(role)) return "Keep your eyes open near " + place + ". If you see trouble, shout before you swing.";
-        if ("priest".equals(role)) return "Bring candles or books to the lectern at " + place + ". Order matters.";
-        if ("scholar".equals(role)) return "If you find odd carvings or fragments, report them. Names and dates, not stories.";
+
+        Map<String, String> vars = new HashMap<>();
+        vars.put("place", place);
+
         if ("worker".equals(role)) {
-            if ("farmer".equalsIgnoreCase(subrole)) return "If crops are ripe, harvest and leave seed behind. We replant what we take.";
-            if ("smith".equalsIgnoreCase(subrole)) return "Coal and iron. That’s all a forge asks. Bring what you find.";
-            if ("mason".equalsIgnoreCase(subrole)) return "Clear rubble and keep stone stacked. " + place + " is always settling.";
-            if ("carpenter".equalsIgnoreCase(subrole)) return "Planks, fences, hinges. Keep doors standing.";
-            return "Haul what you can and don’t break what you can’t replace.";
+            String sr = (subrole == null) ? "" : subrole.trim().toLowerCase(Locale.ROOT);
+            List<String> keys = new ArrayList<>();
+            if (!sr.isEmpty()) keys.add("work.worker." + sr);
+            keys.add("work.worker.default");
+            String picked = dlgPickFromKeys(keys, "Haul what you can and don’t break what you can’t replace.");
+            return applyVars(picked, vars);
         }
-        return "Help where you can. " + place + " remembers who does.";
+
+        String key = "work." + role;
+        String picked = dlgPick(key, null);
+        if (picked != null) return applyVars(picked, vars);
+
+        String fallback = dlgPick("work.townsfolk", "Help where you can. {place} remembers who does.");
+        return applyVars(fallback, vars);
     }
 
     private String acceptWorkLine(String role, String subrole, String originName, String nearName) {
-        if ("guard".equals(role)) return "Good. Keep your blade down until it’s needed.";
-        if ("priest".equals(role)) return "Then go with steadiness. Speak with respect and listen twice.";
-        if ("scholar".equals(role)) return "Bring facts. I can’t use fear.";
         if ("worker".equals(role)) {
-            if ("farmer".equalsIgnoreCase(subrole)) return "Harvest clean. Replant what you cut. Store what you spare.";
-            return "Keep your hands busy and your eyes open.";
+            String sr = (subrole == null) ? "" : subrole.trim().toLowerCase(Locale.ROOT);
+            List<String> keys = new ArrayList<>();
+            if (!sr.isEmpty()) keys.add("acceptWork.worker." + sr);
+            keys.add("acceptWork.worker.default");
+            String picked = dlgPickFromKeys(keys, "Keep your hands busy and your eyes open.");
+            return picked;
         }
-        return "Fair enough. Walk safe.";
+
+        String picked = dlgPick("acceptWork." + role, null);
+        if (picked != null) return picked;
+
+        return dlgPick("acceptWork.townsfolk", "Fair enough. Walk safe.");
     }
 
     private String declineWorkLine(String role) {
-        if ("guard".equals(role)) return "Then don’t make my job harder.";
-        if ("priest".equals(role)) return "No shame in caution. Just don’t mock what you don’t understand.";
-        return "Suit yourself.";
+        String picked = dlgPick("declineWork." + role, null);
+        if (picked != null) return picked;
+        return dlgPick("declineWork.default", "Suit yourself.");
     }
 
     private String empireLine(String role, String originName, String nearName) {
-        List<String> lines = new ArrayList<>();
-        lines.add("Viridia holds because law holds. Chaos is easy. Order is built.");
-        lines.add("The Empire isn’t just banners. It’s roads, ledgers, and the promise that someone answers for harm.");
-        lines.add("We’re not perfect. But we’re still here, and that counts.");
-        if ("guard".equals(role)) lines.add("If you break the peace, you answer. Simple as that.");
-        if ("priest".equals(role)) lines.add("Belief without duty is noise. Duty without belief is rot.");
-        if ("scholar".equals(role)) lines.add("Empires fall when they forget their records. That’s why I write.");
-        return lines.get(ThreadLocalRandom.current().nextInt(lines.size()));
+        List<String> keys = new ArrayList<>();
+        keys.add("empire.base");
+        keys.add("empire.byRoleAdditions." + role);
+
+        return dlgPickFromKeys(keys, "Viridia holds because law holds. Chaos is easy. Order is built.");
     }
 
     private String fallbackLine(String role) {
-        if ("hermit".equals(role)) return "Words are cheap. Leave me.";
-        if ("guard".equals(role)) return "I don’t have time for riddles. Speak plain.";
-        return "I’m not sure what you mean. Try asking for rumors, directions, work, or the Empire.";
+        String picked = dlgPick("fallback." + role, null);
+        if (picked != null) return picked;
+        return dlgPick("fallback.default", "I’m not sure what you mean. Try asking for rumors, directions, work, or the Empire.");
     }
 
     /* ============================================================
@@ -1108,6 +1385,13 @@ startSkinTasks();
 
         return true;
     }
+
+    // ---- remainder of file unchanged from your baseline ----
+    // NOTE: Everything below this point is identical to the prior version you provided,
+    // except where dialogue text was replaced to pull from dialogue.yml and the reload
+    // command/hooks were added above.
+    //
+    // (The rest of the class continues exactly as in your source.)
 
     private void autonomyTick(NPC npc) {
         if (npc == null || !npc.isSpawned()) return;
