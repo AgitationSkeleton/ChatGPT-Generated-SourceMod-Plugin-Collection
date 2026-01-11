@@ -81,6 +81,10 @@ ConVar g_cvarBitScale;
 ConVar g_cvarVoiceDelay;
 ConVar g_cvarEnableFlex;
 
+// Reaction scale pulse
+ConVar g_cvarReactPulseMult;
+ConVar g_cvarReactPulseDuration;
+
 // Flex indices (manual)
 ConVar g_cvarFlexYesIndex;
 ConVar g_cvarFlexNoIndex;
@@ -130,6 +134,10 @@ bool g_hasSpawnedInitial = false;
 // Reaction color fallback
 bool  g_bitColorActive[MAX_BITS];
 float g_bitColorRevertAt[MAX_BITS];
+
+// Reaction scale pulse state
+float g_bitScalePulseStartAt[MAX_BITS];
+float g_bitScalePulseEndsAt[MAX_BITS];
 // -------------------- Helpers --------------------
 
 static bool IsValidEdictEnt(int ent)
@@ -188,6 +196,10 @@ static void ClearBitSlot(int slot)
 
     g_bitColorActive[slot] = false;
     g_bitColorRevertAt[slot] = 0.0;
+
+
+    g_bitScalePulseStartAt[slot] = 0.0;
+    g_bitScalePulseEndsAt[slot] = 0.0;
 }
 
 static void RemoveBitBySlot(int slot)
@@ -312,6 +324,7 @@ static int CreateBitEntity(const float origin[3], bool asPet, int ownerClient)
     // Ensure model + rendering are applied (helps on some TF2 setups)
     SetEntityModel(ent, BIT_MODEL);
     SetEntityRenderMode(ent, RENDER_NORMAL);
+    SetEntityRenderFx(ent, RENDERFX_NONE);
     SetEntityRenderColor(ent, 255, 255, 255, 255);
 
     float scale = g_cvarBitScale.FloatValue;
@@ -459,6 +472,8 @@ public void OnPluginStart()
     g_cvarPetSideOffset = CreateConVar("sm_bits_pet_side", "14.0", "Pet side offset (+right).", FCVAR_NOTIFY, true, -256.0, true, 256.0);
     g_cvarPetHeightOffset = CreateConVar("sm_bits_pet_height", "66.0", "Pet height offset above player origin.", FCVAR_NOTIFY, true, -128.0, true, 256.0);
     g_cvarBitScale = CreateConVar("sm_bits_scale", "1.5", "Scale of Bit model (1.0 = normal).", FCVAR_NOTIFY, true, 0.1, true, 10.0);
+    g_cvarReactPulseMult = CreateConVar("sm_bits_react_pulse_mult", "1.35", "Temporary scale multiplier during yes/no reaction pulse.", FCVAR_NOTIFY, true, 1.0, true, 3.0);
+    g_cvarReactPulseDuration = CreateConVar("sm_bits_react_pulse_duration", "0.25", "Duration (seconds) of the reaction scale pulse.", FCVAR_NOTIFY, true, 0.05, true, 2.0);
     g_cvarVoiceDelay = CreateConVar("sm_bits_voicemenu_delay", "2.65", "Delay (seconds) after voicemenu before Bit reacts, if in range.", FCVAR_NOTIFY, true, 0.0, true, 10.0);
     g_cvarEnableFlex = CreateConVar("sm_bits_enable_flex", "0", "Enable flex-based Yes/No visuals (may not work on all models).", FCVAR_NOTIFY, true, 0.0, true, 1.0);
 
@@ -804,22 +819,36 @@ static void TriggerBitReaction(int slot)
 
     bool isYes = (GetRandomInt(0, 1) == 1);
 
-    //EmitSoundToAll(
-    // Visual response: flex if enabled, otherwise temporary color tint.
-    if (!g_cvarEnableFlex.BoolValue)
-    {
-        if (isYes)
-            SetEntityRenderColor(ent, 255, 255, 0, 255);
-        else
-            SetEntityRenderColor(ent, 255, 0, 0, 255);
+    // Visual response: temporary color tint (flexes intentionally not used).
+    // Keep Bit solid-rendered to avoid respawnroom visualizer translucency sorting issues.
+    SetEntityRenderMode(ent, RENDER_NORMAL);
+    SetEntityRenderFx(ent, RENDERFX_NONE);
 
-        g_bitColorActive[slot] = true;
-        g_bitColorRevertAt[slot] = now + g_cvarPauseOnChat.FloatValue;
+    if (isYes)
+        SetEntityRenderColor(ent, 255, 255, 0, 255);
+    else
+        SetEntityRenderColor(ent, 255, 0, 0, 255);
+
+    g_bitColorActive[slot] = true;
+    g_bitColorRevertAt[slot] = now + g_cvarPauseOnChat.FloatValue;
+
+    // Brief size pulse during reaction, then return to baseline sm_bits_scale
+    float pulseMult = g_cvarReactPulseMult.FloatValue;
+    float pulseDur = g_cvarReactPulseDuration.FloatValue;
+    if (pulseMult > 1.0 && pulseDur > 0.0)
+    {
+        g_bitScalePulseStartAt[slot] = now;
+        g_bitScalePulseEndsAt[slot] = now + pulseDur;
+    }
+    else
+    {
+        g_bitScalePulseStartAt[slot] = 0.0;
+        g_bitScalePulseEndsAt[slot] = 0.0;
     }
 
     EmitSoundToAll(isYes ? BIT_SOUND_YES : BIT_SOUND_NO, ent, SNDCHAN_AUTO, SNDLEVEL_NORMAL);
-    StartBitFlexPulse(slot, isYes);
 }
+
 
 static int FindNearestBitInRange(int client, float range, float &outDistSq)
 {
@@ -1102,10 +1131,35 @@ public Action Timer_Think(Handle timer, any data)
 
         TeleportEntity(ent, pos, ang, NULL_VECTOR);
 
+        // Reaction size pulse (kept solid-rendered to avoid respawn room visualizer issues)
+        if (g_bitScalePulseEndsAt[i] > 0.0)
+        {
+            float baseScale = g_cvarBitScale.FloatValue;
+            if (now <= g_bitScalePulseEndsAt[i])
+            {
+                float dur = g_bitScalePulseEndsAt[i] - g_bitScalePulseStartAt[i];
+                if (dur < 0.001) dur = 0.001;
+                float t01 = (now - g_bitScalePulseStartAt[i]) / dur;
+                if (t01 < 0.0) t01 = 0.0;
+                if (t01 > 1.0) t01 = 1.0;
+                float pulse = Sine(t01 * 3.14159265);
+                float scale = baseScale * (1.0 + (g_cvarReactPulseMult.FloatValue - 1.0) * pulse);
+                SetEntPropFloat(ent, Prop_Send, "m_flModelScale", scale);
+            }
+            else
+            {
+                SetEntPropFloat(ent, Prop_Send, "m_flModelScale", baseScale);
+                g_bitScalePulseStartAt[i] = 0.0;
+                g_bitScalePulseEndsAt[i] = 0.0;
+            }
+        }
+
 
         // Revert temporary reaction tint (flex-disabled visual)
         if (g_bitColorActive[i] && now >= g_bitColorRevertAt[i])
         {
+            SetEntityRenderMode(ent, RENDER_NORMAL);
+            SetEntityRenderFx(ent, RENDERFX_NONE);
             SetEntityRenderColor(ent, 255, 255, 255, 255);
             g_bitColorActive[i] = false;
             g_bitColorRevertAt[i] = 0.0;
