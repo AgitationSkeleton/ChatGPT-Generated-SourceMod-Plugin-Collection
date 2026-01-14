@@ -254,6 +254,7 @@ namespace Core
                 WriteAsciiZ(ms, "player_");
 
 
+                ms.WriteByte(0x00);
                 if (playerNames != null)
                 {
                     for (int i = 0; i < playerNames.Count; i++)
