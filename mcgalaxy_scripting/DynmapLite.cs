@@ -38,6 +38,7 @@ using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 
@@ -77,6 +78,10 @@ public sealed class DynmapLite : Plugin {
     // periodic “soft” refresh for loaded maps (optional)
     SchedulerTask _tickTask;
 
+    UdpClient _udp;
+    Thread _udpThread;
+
+
     public override void Load(bool startup) {
         Directory.CreateDirectory(PluginFolder);
         Directory.CreateDirectory(TilesFolder);
@@ -86,6 +91,7 @@ public sealed class DynmapLite : Plugin {
         EnsureTextureZip();
 
         StartWeb();
+        StartUdp();
 
         // Block changes -> mark dirty tiles
         OnBlockChangingEvent.Register(HandleBlockChanging, Priority.Low);
@@ -99,8 +105,8 @@ public sealed class DynmapLite : Plugin {
         _tickTask = Server.MainScheduler.QueueRepeat(SoftTick, null, TimeSpan.FromSeconds(_cfg.softTickSeconds));
 
         Logger.Log(LogType.SystemActivity,
-            "[DynmapLite] Loaded. Local URL: http://{0}:{1}/  Token: {2}",
-            _cfg.bindHost, _cfg.port, _cfg.accessToken);
+            "[DynmapLite] Loaded. Local URL: http://{0}:{1}/  Token disabled",
+            _cfg.bindHost, _cfg.port, "(disabled)");
     }
 
     public override void Unload(bool shutdown) {
@@ -112,6 +118,7 @@ public sealed class DynmapLite : Plugin {
         OnLevelAddedEvent.Unregister(HandleLevelAdded);
         OnLevelRemovedEvent.Unregister(HandleLevelRemoved);
 
+        StopUdp();
         StopWeb();
         Logger.Log(LogType.SystemActivity, "[DynmapLite] Unloaded.");
     }
@@ -135,6 +142,44 @@ public sealed class DynmapLite : Plugin {
             Logger.Log(LogType.Error, "[DynmapLite] Failed to download texturepack. Rendering will still work using block colors.");
         }
     }
+
+void StartUdp() {
+    // HTTP itself is TCP-only. This UDP socket is just for simple LAN discovery beacons.
+    // If you don't want it, you can remove this entire method and StopUdp().
+    try {
+        _udp = new UdpClient();
+        _udp.EnableBroadcast = true;
+        _running = true;
+
+        _udpThread = new Thread(UdpLoop);
+        _udpThread.IsBackground = true;
+        _udpThread.Start();
+
+        Logger.Log(LogType.SystemActivity, "[DynmapLite] UDP discovery beacons enabled on port {0}", _cfg.port);
+    } catch (Exception ex) {
+        Logger.LogError(ex);
+        Logger.Log(LogType.Error, "[DynmapLite] Failed to start UDP discovery (non-fatal).");
+    }
+}
+
+void StopUdp() {
+    try { if (_udp != null) _udp.Close(); } catch { }
+    _udp = null;
+    try { if (_udpThread != null && _udpThread.IsAlive) _udpThread.Join(500); } catch { }
+    _udpThread = null;
+}
+
+void UdpLoop() {
+    // Sends a broadcast beacon every 5 seconds: "DynmapLite|http://host:port/"
+    IPEndPoint ep = new IPEndPoint(IPAddress.Broadcast, _cfg.port);
+    byte[] payload = Encoding.ASCII.GetBytes("DynmapLite|http://" + _cfg.bindHost + ":" + _cfg.port + "/");
+    while (_running) {
+        try {
+            if (_udp != null) _udp.Send(payload, payload.Length, ep);
+        } catch { }
+        Thread.Sleep(5000);
+    }
+}
 
     void StartWeb() {
         _listener = new HttpListener();
@@ -268,16 +313,7 @@ public sealed class DynmapLite : Plugin {
 
     void HandleHttp(HttpListenerContext ctx) {
         HttpListenerRequest req = ctx.Request;
-        HttpListenerResponse res = ctx.Response;
-
-        if (!IsAuthorized(req)) {
-            res.StatusCode = 401;
-            res.AddHeader("WWW-Authenticate", "Token");
-            WriteText(res, "Unauthorized");
-            return;
-        }
-
-        string path = req.Url.AbsolutePath ?? "/";
+        HttpListenerResponse res = ctx.Response;        string path = req.Url.AbsolutePath ?? "/";
         if (path == "/") {
             res.StatusCode = 200;
             res.ContentType = "text/html; charset=utf-8";
@@ -300,29 +336,7 @@ public sealed class DynmapLite : Plugin {
 
         res.StatusCode = 404;
         WriteText(res, "Not found");
-    }
-
-    bool IsAuthorized(HttpListenerRequest req) {
-        // token can be query ?token= or header X-Auth-Token
-        string token = req.QueryString["token"];
-        if (string.IsNullOrEmpty(token)) {
-            token = req.Headers["X-Auth-Token"];
-        }
-        if (string.IsNullOrEmpty(token)) return false;
-
-        return SlowEquals(token, _cfg.accessToken);
-    }
-
-    // constant-time-ish compare
-    static bool SlowEquals(string a, string b) {
-        if (a == null || b == null) return false;
-        int diff = a.Length ^ b.Length;
-        int len = Math.Min(a.Length, b.Length);
-        for (int i = 0; i < len; i++) diff |= a[i] ^ b[i];
-        return diff == 0;
-    }
-
-    void ServeTile(string path, HttpListenerResponse res) {
+    }    void ServeTile(string path, HttpListenerResponse res) {
         // Expected: /tiles/{world}/{view}/{tx}/{tz}.png
         string[] parts = path.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length != 5) {
@@ -570,12 +584,10 @@ static void SavePngAtomic(Bitmap bmp, string outPath) {
 
     // --- UI + JSON ----------------------------------------------------------
 
-    string BuildIndexHtml() {
+        string BuildIndexHtml() {
         // Minimal UI: worlds list, player list, map panel.
-        // Uses: https://cdn.classicube.net/face/<name>.png
-        // Token is injected into the page and appended to API/tile requests.
-        string tokenEsc = HtmlEscape(_cfg.accessToken);
-
+        // Faces: https://cdn.classicube.net/face/<name>.png
+        // No token required (you asked to remove it).
         string html = @"<!doctype html>
 <html>
 <head>
@@ -588,15 +600,23 @@ body { font-family: Arial, sans-serif; margin: 0; background: #111; color: #ddd;
 #sidebar { width: 320px; padding: 12px; box-sizing: border-box; background: #161616; overflow: auto; }
 #main { flex: 1; display: flex; flex-direction: column; }
 #toolbar { padding: 10px; background: #1e1e1e; border-bottom: 1px solid #2a2a2a; }
-#map { flex: 1; overflow: auto; background: #0b0b0b; padding: 12px; }
+#mapOuter { flex: 1; overflow: auto; background: #0b0b0b; padding: 12px; }
+#map { position: relative; display: inline-block; background: #000; border: 1px solid #2a2a2a; }
+.tile { image-rendering: pixelated; display:block; }
+.tileRow { display:flex; }
+#tileLayer { position: relative; }
+#markerLayer { position:absolute; left:0; top:0; pointer-events:none; }
 .world { padding: 6px 8px; margin: 4px 0; border: 1px solid #2a2a2a; cursor: pointer; }
 .world.loaded { border-color: #2f6; }
 .world.unloaded { opacity: 0.6; }
-.player { display: flex; align-items: center; margin: 6px 0; }
-.player img { width: 24px; height: 24px; margin-right: 8px; image-rendering: pixelated; }
+.playerRow { display:flex; align-items:center; margin: 6px 0; cursor:pointer; }
+.playerRow:hover { background:#1f1f1f; }
+.playerRow img { width: 24px; height: 24px; margin-right: 8px; image-rendering: pixelated; }
 .small { color: #aaa; font-size: 12px; }
 select, button { background: #222; color: #ddd; border: 1px solid #333; padding: 6px; }
-a { color: #9cf; }
+.marker { position:absolute; transform: translate(-50%, -100%); display:flex; flex-direction:column; align-items:center; }
+.marker img { width: 24px; height: 24px; image-rendering: pixelated; border:1px solid rgba(0,0,0,0.6); background:rgba(0,0,0,0.35); }
+.marker span { margin-top:2px; font-size:12px; color:#fff; text-shadow:0 1px 2px #000; background:rgba(0,0,0,0.25); padding:1px 4px; border-radius:3px; white-space:nowrap; }
 </style>
 </head>
 <body>
@@ -607,7 +627,7 @@ a { color: #9cf; }
     <h2 style='margin: 14px 0 10px 0;'>Players</h2>
     <div id='players'></div>
     <div class='small' style='margin-top: 14px;'>
-      Local-only web UI. Token required.
+      Web UI (no token). If you expose this publicly, put it behind a reverse proxy with auth.
     </div>
   </div>
   <div id='main'>
@@ -615,28 +635,29 @@ a { color: #9cf; }
       <label>View:</label>
       <select id='viewSel'>
         <option value='topdown'>Top-down</option>
-        <option value='isometric'>Isometric (draft)</option>
+        <option value='isometric'>Isometric (stitched)</option>
       </select>
       <button id='refreshBtn'>Refresh</button>
       <span class='small' id='status' style='margin-left: 10px;'></span>
     </div>
-    <div id='map'>
-      <div class='small'>Select a world.</div>
+    <div id='mapOuter'>
+      <div id='mapInfo' class='small'>Select a world.</div>
+      <div id='map'>
+        <div id='tileLayer'></div>
+        <div id='markerLayer'></div>
+      </div>
     </div>
   </div>
 </div>
 
 <script>
-var TOKEN = '__TOKEN__';
 var state = null;
 var selectedWorld = null;
+var pendingFocus = null; // {name, world, x, y, z}
 
 function qs(sel) { return document.querySelector(sel); }
-
-// HTML-escape helper
 function esc(s) {
   s = (s === null || s === undefined) ? '' : ('' + s);
-  // Avoid literal double quotes in this template by matching \x22 instead.
   return s.replace(/[&<>\x22]/g, function(c) {
     return ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '\x22':'&quot;' })[c];
   });
@@ -644,7 +665,7 @@ function esc(s) {
 
 function loadState() {
   qs('#status').textContent = 'Loading...';
-  fetch('/api/state?token=' + encodeURIComponent(TOKEN))
+  fetch('/api/state')
     .then(function(r) { return r.json(); })
     .then(function(j) {
       state = j;
@@ -652,9 +673,7 @@ function loadState() {
       if (selectedWorld) renderMap();
       qs('#status').textContent = 'OK';
     })
-    .catch(function() {
-      qs('#status').textContent = 'Error';
-    });
+    .catch(function() { qs('#status').textContent = 'Error'; });
 }
 
 function renderSidebar() {
@@ -670,7 +689,7 @@ function renderSidebar() {
       '</div><div class=small>' + esc(w.size) + '</div>';
 
     div.onclick = (function(worldName) {
-      return function() { selectedWorld = worldName; renderMap(); };
+      return function() { selectedWorld = worldName; pendingFocus = null; renderMap(); };
     })(w.name);
 
     worldsDiv.appendChild(div);
@@ -681,72 +700,244 @@ function renderSidebar() {
   for (var j = 0; j < state.players.length; j++) {
     var p = state.players[j];
     var row = document.createElement('div');
-    row.className = 'player';
+    row.className = 'playerRow';
     var face = 'https://cdn.classicube.net/face/' + encodeURIComponent(p.name) + '.png';
     row.innerHTML =
       '<img src=' + face + ' alt=face>' +
       '<div><div><b>' + esc(p.name) + '</b></div>' +
       '<div class=small>' + esc(p.world) + ' @ ' + p.x + ',' + p.y + ',' + p.z + '</div></div>';
+
+    row.onclick = (function(pp) {
+      return function() {
+        selectedWorld = pp.world;
+        pendingFocus = pp;
+        renderMap();
+      };
+    })(p);
+
     playersDiv.appendChild(row);
   }
 }
 
+function getWorldMeta(worldName) {
+  if (!state) return null;
+  for (var i = 0; i < state.worlds.length; i++) {
+    if (state.worlds[i].name.toLowerCase() === worldName.toLowerCase()) return state.worlds[i];
+  }
+  return null;
+}
+
 function renderMap() {
   var view = qs('#viewSel').value;
-  var mapDiv = qs('#map');
-  if (!selectedWorld) { mapDiv.innerHTML = '<div class=small>Select a world.</div>'; return; }
+  var info = qs('#mapInfo');
+  var tileLayer = qs('#tileLayer');
+  var markerLayer = qs('#markerLayer');
 
-  var w = null;
-  for (var i = 0; i < state.worlds.length; i++) {
-    if (state.worlds[i].name.toLowerCase() === selectedWorld.toLowerCase()) { w = state.worlds[i]; break; }
-  }
-  if (!w) { mapDiv.innerHTML = '<div class=small>World not found.</div>'; return; }
+  tileLayer.innerHTML = '';
+  markerLayer.innerHTML = '';
+  qs('#map').style.display = selectedWorld ? 'inline-block' : 'none';
 
-  var tilesX = w.tilesX;
-  var tilesZ = w.tilesZ;
+  if (!selectedWorld) { info.textContent = 'Select a world.'; return; }
 
-  var html = '';
-  html += '<div style=margin-bottom:10px;><b>' + esc(selectedWorld) + '</b> <span class=small>(' + (w.loaded ? 'loaded' : 'unloaded') + ')</span></div>';
+  var w = getWorldMeta(selectedWorld);
+  if (!w) { info.textContent = 'World not found.'; return; }
 
-  if (!w.loaded) {
-    html += '<div class=small style=margin-bottom:10px;>World is unloaded. Tiles may be missing until it is loaded at least once (draft behavior).</div>';
-  }
+  info.innerHTML = '<b>' + esc(selectedWorld) + '</b> <span class=small>(' + (w.loaded ? 'loaded' : 'unloaded') + ')</span>';
 
-  if (!tilesX || !tilesZ) {
-    html += '<div class=small>No tile metadata available yet for this world.</div>';
-    mapDiv.innerHTML = html;
+  if (!w.tilesX || !w.tilesZ) {
+    tileLayer.innerHTML = '<div class=small style=padding:10px;>No tile metadata available for this world (unloaded).</div>';
     return;
   }
 
-  html += '<div style=display:inline-block;border:1px solid #2a2a2a;background:#000;>';
-  for (var tz = 0; tz < tilesZ; tz++) {
-    html += '<div style=display:flex;>';
-    for (var tx = 0; tx < tilesX; tx++) {
-      var src = '/tiles/' + encodeURIComponent(selectedWorld) + '/' + encodeURIComponent(view) + '/' + tx + '/' + tz +
-        '.png?token=' + encodeURIComponent(TOKEN) + '&_=' + Date.now();
-      html += '<img src=' + src + ' style=image-rendering:pixelated; />';
-    }
-    html += '</div>';
-  }
-  html += '</div>';
+  var tileSize = state.tileSize || 64; // blocks per tile, and also pixels per tile in topdown tiles
+  var tilesX = w.tilesX, tilesZ = w.tilesZ;
 
-  mapDiv.innerHTML = html;
+  if (view === 'topdown') {
+    // simple grid
+    var container = document.createElement('div');
+    for (var tz = 0; tz < tilesZ; tz++) {
+      var row = document.createElement('div');
+      row.className = 'tileRow';
+      for (var tx = 0; tx < tilesX; tx++) {
+        var img = document.createElement('img');
+        img.className = 'tile';
+        img.src = '/tiles/' + encodeURIComponent(selectedWorld) + '/topdown/' + tx + '/' + tz + '.png?_=' + Date.now();
+        row.appendChild(img);
+      }
+      container.appendChild(row);
+    }
+    tileLayer.appendChild(container);
+    // set layer size
+    tileLayer.style.position = 'relative';
+    qs('#map').style.width  = (tilesX * tileSize) + 'px';
+    qs('#map').style.height = (tilesZ * tileSize) + 'px';
+    markerLayer.style.width  = qs('#map').style.width;
+    markerLayer.style.height = qs('#map').style.height;
+    markerLayer.style.pointerEvents = 'none';
+    renderMarkersTopdown(w, tileSize);
+  } else {
+    // isometric stitched: absolute position each tile in a diamond grid
+    // The renderer makes each iso tile a fixed bitmap:
+    // canvasW = (tileSize + tileSize) * px + 4, canvasH = (tileSize + tileSize) * (px/2) + 64
+    var px = 2;
+    var tileW = (tileSize + tileSize) * px + 4;
+    var tileH = (tileSize + tileSize) * (px/2) + 64;
+    var stepX = tileSize * px;
+    var stepY = tileSize * (px/2);
+
+    tileLayer.style.position = 'relative';
+
+    // overall bounds for container
+    var minX = 1e9, minY = 1e9, maxX = -1e9, maxY = -1e9;
+
+    for (var tz = 0; tz < tilesZ; tz++) {
+      for (var tx = 0; tx < tilesX; tx++) {
+        var left = (tx - tz) * stepX;
+        var top  = (tx + tz) * stepY;
+
+        minX = Math.min(minX, left);
+        minY = Math.min(minY, top);
+        maxX = Math.max(maxX, left + tileW);
+        maxY = Math.max(maxY, top + tileH);
+
+        var img = document.createElement('img');
+        img.className = 'tile';
+        img.style.position = 'absolute';
+        img.style.left = left + 'px';
+        img.style.top  = top + 'px';
+        img.src = '/tiles/' + encodeURIComponent(selectedWorld) + '/isometric/' + tx + '/' + tz + '.png?_=' + Date.now();
+        tileLayer.appendChild(img);
+      }
+    }
+
+    // normalize to start at 0,0 by shifting contents
+    var shiftX = -minX + 20;
+    var shiftY = -minY + 20;
+    tileLayer.style.left = shiftX + 'px';
+    tileLayer.style.top  = shiftY + 'px';
+
+    var mapW = (maxX - minX) + 40;
+    var mapH = (maxY - minY) + 40;
+
+    qs('#map').style.width  = mapW + 'px';
+    qs('#map').style.height = mapH + 'px';
+    markerLayer.style.width  = mapW + 'px';
+    markerLayer.style.height = mapH + 'px';
+    markerLayer.style.pointerEvents = 'none';
+
+    renderMarkersIso(w, tileSize, px, tileW, tileH, stepX, stepY, shiftX, shiftY);
+  }
+
+  // Focus (after render)
+  if (pendingFocus && pendingFocus.world && pendingFocus.world.toLowerCase() === selectedWorld.toLowerCase()) {
+    focusOnPlayer(pendingFocus.name);
+  }
+}
+
+function renderMarkersTopdown(worldMeta, tileSize) {
+  var markerLayer = qs('#markerLayer');
+  markerLayer.innerHTML = '';
+
+  for (var i = 0; i < state.players.length; i++) {
+    var p = state.players[i];
+    if (p.world.toLowerCase() !== selectedWorld.toLowerCase()) continue;
+
+    var left = p.x;
+    var top  = p.z;
+
+    var m = document.createElement('div');
+    m.className = 'marker';
+    m.style.left = left + 'px';
+    m.style.top  = top + 'px';
+
+    var face = document.createElement('img');
+    face.src = 'https://cdn.classicube.net/face/' + encodeURIComponent(p.name) + '.png';
+
+    var label = document.createElement('span');
+    label.textContent = p.name;
+
+    m.appendChild(face);
+    m.appendChild(label);
+    markerLayer.appendChild(m);
+
+    // give it an id for focusing
+    m.setAttribute('data-player', p.name.toLowerCase());
+  }
+}
+
+function renderMarkersIso(worldMeta, tileSize, px, tileW, tileH, stepX, stepY, shiftX, shiftY) {
+  var markerLayer = qs('#markerLayer');
+  markerLayer.innerHTML = '';
+
+  var tilesX = worldMeta.tilesX, tilesZ = worldMeta.tilesZ;
+
+  for (var i = 0; i < state.players.length; i++) {
+    var p = state.players[i];
+    if (p.world.toLowerCase() !== selectedWorld.toLowerCase()) continue;
+
+    var tx = Math.floor(p.x / tileSize);
+    var tz = Math.floor(p.z / tileSize);
+    if (tx < 0 || tz < 0 || tx >= tilesX || tz >= tilesZ) continue;
+
+    var dx = p.x - (tx * tileSize);
+    var dz = p.z - (tz * tileSize);
+
+    // Match RenderIsometricDraft() math (tile-local)
+    var canvasW = tileW;
+    var isoXLocal = (dx - dz) * px + (canvasW / 2);
+    var isoYLocal = (dx + dz) * (px/2) + 16 - Math.floor(p.y / 4);
+
+    var tileLeft = (tx - tz) * stepX + shiftX;
+    var tileTop  = (tx + tz) * stepY + shiftY;
+
+    var left = tileLeft + isoXLocal;
+    var top  = tileTop  + isoYLocal;
+
+    var m = document.createElement('div');
+    m.className = 'marker';
+    m.style.left = left + 'px';
+    m.style.top  = top + 'px';
+
+    var face = document.createElement('img');
+    face.src = 'https://cdn.classicube.net/face/' + encodeURIComponent(p.name) + '.png';
+
+    var label = document.createElement('span');
+    label.textContent = p.name;
+
+    m.appendChild(face);
+    m.appendChild(label);
+    markerLayer.appendChild(m);
+
+    m.setAttribute('data-player', p.name.toLowerCase());
+  }
+}
+
+function focusOnPlayer(name) {
+  var mapOuter = qs('#mapOuter');
+  var marker = qs('.marker[data-player=\'' + name.toLowerCase() + '\']');
+  if (!marker) return;
+
+  // Scroll container so marker is near center
+  var rect = marker.getBoundingClientRect();
+  var outerRect = mapOuter.getBoundingClientRect();
+
+  var dx = (rect.left + rect.width/2) - (outerRect.left + outerRect.width/2);
+  var dy = (rect.top  + rect.height/2) - (outerRect.top  + outerRect.height/2);
+
+  mapOuter.scrollLeft += dx;
+  mapOuter.scrollTop  += dy;
 }
 
 qs('#refreshBtn').onclick = loadState;
-qs('#viewSel').onchange = renderMap;
+qs('#viewSel').onchange = function() { pendingFocus = null; renderMap(); };
 
 loadState();
 setInterval(loadState, 3000);
 </script>
 </body>
 </html>";
-        return html.Replace("__TOKEN__", tokenEsc);
-    }
-
-
-
-    string BuildStateJson() {
+        return html;
+    }string BuildStateJson() {
         // worlds: all map names (loaded/unloaded), with dimensions if loaded
         // players: online players with integer block coords
         string[] allMaps = LevelInfo.AllMapNames(); // documented in API docs :contentReference[oaicite:1]{index=1}
@@ -790,7 +981,7 @@ setInterval(loadState, 3000);
             sb.Append("\"tilesZ\":").Append(tilesZ.ToString(CultureInfo.InvariantCulture));
             sb.Append("}");
         }
-        sb.Append("],\"players\":[");
+        sb.Append("],\"tileSize\":").Append(_cfg.tileSize.ToString(CultureInfo.InvariantCulture)).Append(",\"players\":[");
 
         Player[] players = PlayerInfo.Online.Items;
         bool firstP = true;
@@ -845,18 +1036,15 @@ setInterval(loadState, 3000);
 // --- Config ----------------------------------------------------------------
 
 internal sealed class DynmapConfig {
-    public string bindHost = "127.0.0.1"; // local-only default
+    public string bindHost = "0.0.0.0"; // bind on all interfaces (you asked TCP+UDP on the port)
     public int port = 48123;
-    public string accessToken = "";
     public int tileSize = 64;
     public int softTickSeconds = 5;
 
     public static DynmapConfig LoadOrCreate(string path) {
         DynmapConfig cfg = new DynmapConfig();
 
-        if (!File.Exists(path)) {
-            cfg.accessToken = MakeToken(32);
-            cfg.Save(path);
+        if (!File.Exists(path)) {            cfg.Save(path);
             return cfg;
         }
 
@@ -874,20 +1062,12 @@ internal sealed class DynmapConfig {
 
                 if (key.Equals("bindHost", StringComparison.OrdinalIgnoreCase)) cfg.bindHost = val;
                 else if (key.Equals("port", StringComparison.OrdinalIgnoreCase)) cfg.port = ParseInt(val, 48123);
-                else if (key.Equals("accessToken", StringComparison.OrdinalIgnoreCase)) cfg.accessToken = val;
-                else if (key.Equals("tileSize", StringComparison.OrdinalIgnoreCase)) cfg.tileSize = Clamp(ParseInt(val, 64), 16, 256);
+                                else if (key.Equals("tileSize", StringComparison.OrdinalIgnoreCase)) cfg.tileSize = Clamp(ParseInt(val, 64), 16, 256);
                 else if (key.Equals("softTickSeconds", StringComparison.OrdinalIgnoreCase)) cfg.softTickSeconds = Clamp(ParseInt(val, 5), 0, 60);
             }
         } catch {
             // fall back to defaults
-        }
-
-        if (string.IsNullOrEmpty(cfg.accessToken)) {
-            cfg.accessToken = MakeToken(32);
-            cfg.Save(path);
-        }
-
-        return cfg;
+        }        return cfg;
     }
 
     public void Save(string path) {
@@ -896,8 +1076,7 @@ internal sealed class DynmapConfig {
         sb.AppendLine("# bindHost=127.0.0.1 keeps it local-only. Change to 0.0.0.0 at your own risk.");
         sb.AppendLine("bindHost=" + bindHost);
         sb.AppendLine("port=" + port.ToString(CultureInfo.InvariantCulture));
-        sb.AppendLine("accessToken=" + accessToken);
-        sb.AppendLine("# Tile size in blocks (power of two recommended).");
+                sb.AppendLine("# Tile size in blocks (power of two recommended).");
         sb.AppendLine("tileSize=" + tileSize.ToString(CultureInfo.InvariantCulture));
         sb.AppendLine("# If >0, periodically marks tiles near players dirty (cheap refresh).");
         sb.AppendLine("softTickSeconds=" + softTickSeconds.ToString(CultureInfo.InvariantCulture));
