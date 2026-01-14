@@ -1,0 +1,5 @@
+name: RetroQuery
+main: RetroQuery
+version: 1.0.0
+author: ChatGPT
+description: Query bridge for legacy Bukkit/Poseidon servers, providing TCP and GameSpy4-style UDP query.
