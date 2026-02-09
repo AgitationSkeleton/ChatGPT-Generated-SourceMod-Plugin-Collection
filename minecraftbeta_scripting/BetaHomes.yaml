@@ -1,0 +1,17 @@
+main: BetaHomes
+name: BetaHomes
+version: 1.0
+author: ChatGPT
+commands:
+  sethome:
+    description: Set your home in the current world.
+    usage: /sethome
+  home:
+  description: Teleport to your home in the current or specified world.
+  usage: /home [world]
+  homelist:
+    description: List worlds where you have homes set.
+    usage: /homelist
+  clearhome:
+    description: Clear your home in a world, or all homes.
+    usage: /clearhome <world|all>
