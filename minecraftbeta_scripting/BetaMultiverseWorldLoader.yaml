@@ -1,0 +1,6 @@
+name: BetaMultiverseWorldLoader
+main: BetaMultiverseWorldLoader
+version: 1.0.3
+author: ChatGPT
+description: Forces existing worlds to load on Poseidon/Bukkit Beta 1.7.3 and enforces custom generators by unloading/reloading as needed.
+softdepend: [Multiverse-Core]
