@@ -1,0 +1,8 @@
+name: PerWorldInventory
+main: PerWorldInventory
+version: 1.0.0
+author: ChatGPT
+commands:
+  pwi:
+    description: Toggle per-world inventory tracking
+    usage: /pwi
