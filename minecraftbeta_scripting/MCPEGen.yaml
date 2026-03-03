@@ -1,0 +1,6 @@
+name: MCPEGen
+main: MCPEGen
+version: 1.0.0
+author: ChatGPT
+description: Faithful port of the minecraftcpp Pocket Edition-style RandomLevelSource worldgen for Beta 1.7.3 Poseidon.
+load: STARTUP

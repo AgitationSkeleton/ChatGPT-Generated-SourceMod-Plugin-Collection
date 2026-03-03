@@ -1,0 +1,5 @@
+name: AlphaFloatingIslands
+main: AlphaFloatingIslands
+version: 1.0
+author: ChatGPT
+description: Alpha-era floating islands terrain generator for Poseidon/CraftBukkit Beta 1.7.3 (no water, no bedrock).

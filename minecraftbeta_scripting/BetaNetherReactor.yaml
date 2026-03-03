@@ -1,0 +1,5 @@
+name: BetaNetherReactor
+main: BetaNetherReactor
+version: 1.0
+author: ChatGPT
+description: Nether Reactor (MCPE-style) adapted for Minecraft Beta 1.7.3 using a Diamond Block core.
