@@ -1,0 +1,6 @@
+name: BetaVillageHousesPlugin
+main: BetaVillageHousesPlugin
+version: 1.21.10-1
+api-version: "1.21"
+author: ChatGPT
+description: Beta-style random village houses + Zombified Piglin spawns (ported from Beta Bukkit plugin).
